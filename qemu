@@ -1,0 +1,10 @@
+qemu-system-x86_64 \
+    -kernel kernel \
+    -initrd irfs.gz \
+    -cpu core2duo \
+    -smp cores=2,threads=1,sockets=1 \
+    -netdev user,id=net0 \
+    -device rtl8139,netdev=net0 \
+    -drive file=vm.img,format=raw,if=ide,media=disk,index=0 \
+    -nographic \
+    -m 512M

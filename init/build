@@ -1,0 +1,7 @@
+#Cleaning and building minios-installer
+cargo clean
+cargo build --release --target x86_64-unknown-linux-musl
+file target/x86_64-unknown-linux-musl/release/minios-installer
+cp target/x86_64-unknown-linux-musl/release/minios-installer ~/Thome/vm/irfs/init
+cd ../Thome/vm
+./rfs

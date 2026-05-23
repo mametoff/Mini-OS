@@ -1,0 +1,3 @@
+#For building irfs.gz
+cd irfs
+find . | cpio -o -H newc | gzip > ../irfs.gz
