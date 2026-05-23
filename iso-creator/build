@@ -1,27 +1,100 @@
 #!/bin/bash
-# Сборка загрузочного ISO с патчем LBA в loader
+# Полная сборка загрузочного ISO
+# Автоматически пересобирает loader и boot при изменении kernel/irfs
 
 set -e
 
 cd "$(dirname "$0")"
 
 # Проверка входных файлов
-for f in ../kernel/kernel ../irfs/irfs.gz boot/boot.bin loader/loader.bin; do
+for f in ../kernel/kernel ../irfs/irfs.gz boot/boot.asm loader/loader.asm; do
     if [ ! -f "$f" ]; then
         echo "Ошибка: $f не найден"
         exit 1
     fi
 done
 
-# Создаём структуру
+echo "========================================="
+echo "  Сборка загрузочного ISO"
+echo "========================================="
+
+# --------------------------------------------------
+# Этап 1: Получаем размеры kernel и irfs
+# --------------------------------------------------
+KERNEL_SIZE=$(stat -c%s "../kernel/kernel")
+IRFS_SIZE=$(stat -c%s "../irfs/irfs.gz")
+KERNEL_SECTORS=$(( (KERNEL_SIZE + 511) / 512 ))
+IRFS_SECTORS=$(( (IRFS_SIZE + 511) / 512 ))
+
+echo ""
+echo "Размеры файлов:"
+echo "  Kernel: $KERNEL_SIZE байт ($KERNEL_SECTORS секторов)"
+echo "  Irfs:   $IRFS_SIZE байт ($IRFS_SECTORS секторов)"
+
+# --------------------------------------------------
+# Этап 2: Собираем boot.bin
+# --------------------------------------------------
+echo ""
+echo "Сборка boot..."
+
+cd boot
+nasm -f bin boot.asm -o boot.bin
+rm -f *.lst *.map *.obj
+cd ..
+
+echo "  Boot собран: $(wc -c < boot/boot.bin) байт"
+
+# --------------------------------------------------
+# Этап 3: Собираем loader с актуальными размерами
+# --------------------------------------------------
+echo ""
+echo "Сборка loader..."
+
+cd loader
+nasm -f bin loader.asm -o loader.bin \
+    -dKERNEL_SECTORS=$KERNEL_SECTORS \
+    -dIRFS_SECTORS=$IRFS_SECTORS \
+    -dIRFS_SIZE=$IRFS_SIZE
+
+# Патчим kernel_sectors по смещению 0x100
+printf "$(printf '\\x%02x\\x%02x' \
+    $(( KERNEL_SECTORS & 0xFF )) \
+    $(( (KERNEL_SECTORS >> 8) & 0xFF )))" | \
+    dd of=loader.bin bs=1 seek=$((0x100)) conv=notrunc status=none
+
+# Патчим irfs_sectors по смещению 0x106
+printf "$(printf '\\x%02x\\x%02x' \
+    $(( IRFS_SECTORS & 0xFF )) \
+    $(( (IRFS_SECTORS >> 8) & 0xFF )))" | \
+    dd of=loader.bin bs=1 seek=$((0x106)) conv=notrunc status=none
+
+# Патчим irfs_size по смещению 0x108
+printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
+    $(( IRFS_SIZE & 0xFF )) \
+    $(( (IRFS_SIZE >> 8) & 0xFF )) \
+    $(( (IRFS_SIZE >> 16) & 0xFF )) \
+    $(( (IRFS_SIZE >> 24) & 0xFF )))" | \
+    dd of=loader.bin bs=1 seek=$((0x108)) conv=notrunc status=none
+
+rm -f *.lst *.map *.obj
+cd ..
+
+echo "  Loader собран: $(wc -c < loader/loader.bin) байт"
+
+# --------------------------------------------------
+# Этап 4: Создаём структуру ISO
+# --------------------------------------------------
+echo ""
+echo "Создание структуры ISO..."
+
 rm -rf output
 mkdir -p output/iso
 
-# Копируем файлы
+# Копируем файлы в ISO
 cp ../kernel/kernel output/iso/kernel
 cp ../irfs/irfs.gz   output/iso/irfs.gz
 
-# Копируем loader.bin для патча
+# Копируем loader.bin для патча LBA
 cp loader/loader.bin output/loader_patched.bin
 
 # Создаём образ дискеты с загрузчиком
@@ -29,30 +102,50 @@ dd if=/dev/zero of=output/iso/disk.img bs=512 count=2880 status=none
 dd if=boot/boot.bin              of=output/iso/disk.img bs=512 count=1 conv=notrunc status=none
 dd if=output/loader_patched.bin  of=output/iso/disk.img bs=512 seek=1 conv=notrunc status=none
 
-# Создаём временный ISO для определения LBA
+echo "  Disk.img создан: $(wc -c < output/iso/disk.img) байт"
+
+# --------------------------------------------------
+# Этап 5: Создаём временный ISO для определения LBA
+# --------------------------------------------------
+echo ""
+echo "Создание временного ISO..."
+
 genisoimage -R -J \
     -b disk.img \
     -c boot.catalog \
     -no-emul-boot \
     -boot-load-size 4 \
+    -boot-info-table \
     -o output/temp.iso \
     output/iso 2>/dev/null
 
-# Получаем LBA адреса (число в квадратных скобках перед "00]")
-echo "Определяю LBA..."
+# Получаем LBA адреса
+echo "Определение LBA адресов..."
+
 KERNEL_LBA=$(isoinfo -l -i output/temp.iso | grep -i "KERNEL" | grep -o '\[.*00\]' | tr -d '[]' | awk '{print $1}')
 IRFS_LBA=$(isoinfo -l -i output/temp.iso | grep -i "IRFS" | grep -o '\[.*00\]' | tr -d '[]' | awk '{print $1}')
+DISK_LBA=$(isoinfo -l -i output/temp.iso | grep -i "DISK.IMG" | grep -o '\[.*00\]' | tr -d '[]' | awk '{print $1}')
 
-if [ -z "$KERNEL_LBA" ] || [ -z "$IRFS_LBA" ]; then
+if [ -z "$KERNEL_LBA" ] || [ -z "$IRFS_LBA" ] || [ -z "$DISK_LBA" ]; then
     echo "Ошибка: не удалось определить LBA"
+    echo "Kernel: $KERNEL_LBA"
+    echo "IRFS:   $IRFS_LBA"
+    echo "Disk:   $DISK_LBA"
     isoinfo -l -i output/temp.iso
+    rm -f output/temp.iso
     exit 1
 fi
 
-echo "Kernel LBA: $KERNEL_LBA"
-echo "IRFS LBA:   $IRFS_LBA"
+echo "  Disk.img LBA: $DISK_LBA"
+echo "  Kernel LBA:   $KERNEL_LBA"
+echo "  IRFS LBA:     $IRFS_LBA"
 
-# Патчим loader_patched.bin
+# --------------------------------------------------
+# Этап 6: Патчим loader LBA адресами
+# --------------------------------------------------
+echo ""
+echo "Патч loader LBA адресами..."
+
 # kernel_lba по смещению 0xFC (4 байта, little-endian)
 printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
     $(( KERNEL_LBA & 0xFF )) \
@@ -69,23 +162,36 @@ printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
     $(( (IRFS_LBA >> 24) & 0xFF )))" | \
     dd of=output/loader_patched.bin bs=1 seek=$((0x102)) conv=notrunc status=none
 
-echo "LBA записаны в loader"
+echo "  Патч завершён"
+
+# --------------------------------------------------
+# Этап 7: Обновляем disk.img и создаём финальный ISO
+# --------------------------------------------------
+echo ""
+echo "Создание финального ISO..."
 
 # Обновляем disk.img с пропатченным loader
 dd if=output/loader_patched.bin of=output/iso/disk.img bs=512 seek=1 conv=notrunc status=none
 
-# Создаём финальный ISO
+# Создаём финальный ISO с boot-info-table
 genisoimage -R -J \
     -b disk.img \
     -c boot.catalog \
     -no-emul-boot \
     -boot-load-size 4 \
+    -boot-info-table \
     -o output/minios.iso \
     output/iso 2>/dev/null
 
-# Очистка
-rm -f output/temp.iso output/loader_patched.bin
+# --------------------------------------------------
+# Этап 8: Очистка
+# --------------------------------------------------
+rm -f output/temp.iso output/loader_patched.bin output/iso/disk.img output/iso/kernel output/iso/irfs.gz
+rmdir output/iso 2>/dev/null || true
 
-echo "Готово: output/minios.iso"
-ls -lh output/minios.iso
-
+echo ""
+echo "========================================="
+echo "  ISO создан успешно!"
+echo "  Файл: output/minios.iso"
+echo "  Размер: $(du -h output/minios.iso | cut -f1)"
+echo "========================================="

@@ -1,4 +1,4 @@
-; boot.asm - Boot Sector (финальный)
+; boot.asm - использует boot-info-table от genisoimage
 
 [BITS 16]
 [ORG 0x7C00]
@@ -17,11 +17,16 @@ start:
     mov si, msgBoot
     call print_string
 
-    ; Читаем loader — он находится в disk.img начиная с сектора 1
-    ; disk.img начинается с LBA=15 (определено экспериментально)
-    ; Значит loader на LBA=16
-    mov dword [dap.lba], 16     ; LBA для loader'а
-    mov word [dap.count], 16    ; 16 секторов (8 КБ)
+    ; genisoimage с -boot-info-table записывает LBA boot-образа
+    ; по смещению 8 в загрузочном секторе (4 байта, little-endian)
+    ; Это LBA текущего сектора (начала disk.img)
+    mov eax, [0x7C08]            ; читаем LBA из boot-info-table
+    
+    ; Добавляем 1 чтобы получить LBA loader'а (сектор 1 внутри disk.img)
+    inc eax
+    
+    mov dword [dap.lba], eax
+    mov word [dap.count], 16     ; 16 секторов
     mov word [dap.segment], 0x1000
     mov word [dap.offset], 0x0000
 
@@ -34,7 +39,7 @@ start:
     mov si, msgLoad
     call print_string
 
-    ; Передаём управление loader'у
+    ; Прыгаем на loader
     mov dl, [bootDrive]
     jmp 0x1000:0x0000
 
