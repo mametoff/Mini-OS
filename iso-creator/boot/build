@@ -1,7 +1,0 @@
-#!/bin/bash
-# Сборка boot sector
-
-cd "$(dirname "$0")"
-
-nasm -f bin boot.asm -o boot.bin
-rm -f *.lst *.map *.obj
