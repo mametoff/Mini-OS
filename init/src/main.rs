@@ -180,7 +180,7 @@ println!("\n=== Installation Mode ===");
 
 	println!("\n=== Downloading rootfs ===");
 
-	let url = "https://github.com/Mini-OS/Mini-OS/raw/refs/heads/main/rootfs.tar.gz";
+	let url = "https://github.com/Mini-OS/Mini-OS/raw/refs/heads/main/rootfs/rootfs.tar.gz";
 	let output_path = "/install/rootfs.tar.gz";
 	std::fs::create_dir_all("/install").map_err(|e| format!("Failed to create /install: {}", e))?;
 

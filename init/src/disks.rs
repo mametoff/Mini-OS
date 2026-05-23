@@ -275,7 +275,7 @@ pub fn format_ext2(dev_path: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     if output.status.success() {
-        Ok(())
+        Ok((println!(" \~E Root paetition formated  on {}", disk_path);))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
