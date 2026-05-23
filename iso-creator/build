@@ -1,0 +1,91 @@
+#!/bin/bash
+# Сборка загрузочного ISO с патчем LBA в loader
+
+set -e
+
+cd "$(dirname "$0")"
+
+# Проверка входных файлов
+for f in ../kernel/kernel ../irfs/irfs.gz boot/boot.bin loader/loader.bin; do
+    if [ ! -f "$f" ]; then
+        echo "Ошибка: $f не найден"
+        exit 1
+    fi
+done
+
+# Создаём структуру
+rm -rf output
+mkdir -p output/iso
+
+# Копируем файлы
+cp ../kernel/kernel output/iso/kernel
+cp ../irfs/irfs.gz   output/iso/irfs.gz
+
+# Копируем loader.bin для патча
+cp loader/loader.bin output/loader_patched.bin
+
+# Создаём образ дискеты с загрузчиком
+dd if=/dev/zero of=output/iso/disk.img bs=512 count=2880 status=none
+dd if=boot/boot.bin              of=output/iso/disk.img bs=512 count=1 conv=notrunc status=none
+dd if=output/loader_patched.bin  of=output/iso/disk.img bs=512 seek=1 conv=notrunc status=none
+
+# Создаём временный ISO для определения LBA
+genisoimage -R -J \
+    -b disk.img \
+    -c boot.catalog \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -o output/temp.iso \
+    output/iso 2>/dev/null
+
+# Получаем LBA адреса (число в квадратных скобках перед "00]")
+echo "Определяю LBA..."
+KERNEL_LBA=$(isoinfo -l -i output/temp.iso | grep -i "KERNEL" | grep -o '\[.*00\]' | tr -d '[]' | awk '{print $1}')
+IRFS_LBA=$(isoinfo -l -i output/temp.iso | grep -i "IRFS" | grep -o '\[.*00\]' | tr -d '[]' | awk '{print $1}')
+
+if [ -z "$KERNEL_LBA" ] || [ -z "$IRFS_LBA" ]; then
+    echo "Ошибка: не удалось определить LBA"
+    isoinfo -l -i output/temp.iso
+    exit 1
+fi
+
+echo "Kernel LBA: $KERNEL_LBA"
+echo "IRFS LBA:   $IRFS_LBA"
+
+# Патчим loader_patched.bin
+# kernel_lba по смещению 0xFC (4 байта, little-endian)
+printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
+    $(( KERNEL_LBA & 0xFF )) \
+    $(( (KERNEL_LBA >> 8) & 0xFF )) \
+    $(( (KERNEL_LBA >> 16) & 0xFF )) \
+    $(( (KERNEL_LBA >> 24) & 0xFF )))" | \
+    dd of=output/loader_patched.bin bs=1 seek=$((0xFC)) conv=notrunc status=none
+
+# irfs_lba по смещению 0x102 (4 байта, little-endian)
+printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
+    $(( IRFS_LBA & 0xFF )) \
+    $(( (IRFS_LBA >> 8) & 0xFF )) \
+    $(( (IRFS_LBA >> 16) & 0xFF )) \
+    $(( (IRFS_LBA >> 24) & 0xFF )))" | \
+    dd of=output/loader_patched.bin bs=1 seek=$((0x102)) conv=notrunc status=none
+
+echo "LBA записаны в loader"
+
+# Обновляем disk.img с пропатченным loader
+dd if=output/loader_patched.bin of=output/iso/disk.img bs=512 seek=1 conv=notrunc status=none
+
+# Создаём финальный ISO
+genisoimage -R -J \
+    -b disk.img \
+    -c boot.catalog \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -o output/minios.iso \
+    output/iso 2>/dev/null
+
+# Очистка
+rm -f output/temp.iso output/loader_patched.bin
+
+echo "Готово: output/minios.iso"
+ls -lh output/minios.iso
+

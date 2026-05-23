@@ -1,0 +1,42 @@
+#!/bin/bash
+# Сборка loader с записью актуальных значений
+
+set -e
+cd "$(dirname "$0")"
+
+KERNEL="../../kernel/kernel"
+IRFS="../../irfs/irfs.gz"
+
+if [ ! -f "$KERNEL" ] || [ ! -f "$IRFS" ]; then
+    echo "Ошибка: kernel или irfs не найдены"
+    exit 1
+fi
+
+KERNEL_SIZE=$(stat -c%s "$KERNEL")
+IRFS_SIZE=$(stat -c%s "$IRFS")
+KERNEL_SECTORS=$(( (KERNEL_SIZE + 511) / 512 ))
+IRFS_SECTORS=$(( (IRFS_SIZE + 511) / 512 ))
+
+echo "Kernel: $KERNEL_SIZE байт ($KERNEL_SECTORS секторов)"
+echo "Irfs:   $IRFS_SIZE байт ($IRFS_SECTORS секторов)"
+
+# Собираем loader
+nasm -f bin loader.asm -o loader.bin \
+    -dKERNEL_SECTORS=$KERNEL_SECTORS \
+    -dIRFS_SECTORS=$IRFS_SECTORS \
+    -dIRFS_SIZE=$IRFS_SIZE
+
+# Записываем kernel_sectors по смещению 0x100
+printf "$(printf '\\x%02x' $(( KERNEL_SECTORS & 0xFF )) $(( (KERNEL_SECTORS >> 8) & 0xFF )))" | \
+    dd of=loader.bin bs=1 seek=$((0x100)) conv=notrunc status=none
+
+# Записываем irfs_sectors по смещению 0x106
+printf "$(printf '\\x%02x' $(( IRFS_SECTORS & 0xFF )) $(( (IRFS_SECTORS >> 8) & 0xFF )))" | \
+    dd of=loader.bin bs=1 seek=$((0x106)) conv=notrunc status=none
+
+# Записываем irfs_size по смещению 0x108
+printf "$(printf '\\x%02x' $(( IRFS_SIZE & 0xFF )) $(( (IRFS_SIZE >> 8) & 0xFF )) $(( (IRFS_SIZE >> 16) & 0xFF )) $(( (IRFS_SIZE >> 24) & 0xFF )))" | \
+    dd of=loader.bin bs=1 seek=$((0x108)) conv=notrunc status=none
+
+echo "Значения записаны в loader.bin"
+echo "Готово!"

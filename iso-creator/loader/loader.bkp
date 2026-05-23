@@ -1,0 +1,161 @@
+; loader.asm - загрузчик ядра Linux (с отладкой)
+
+[BITS 16]
+[ORG 0x1000]
+
+start:
+    cli
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00
+    sti
+
+    mov [boot_drive], dl
+
+    mov si, msg_loader
+    call print
+
+    ; 1. Проверяем, что можем читать через LBA
+    mov si, msg_lba
+    call print
+
+    mov eax, [kernel_lba]
+    cmp eax, 0
+    je .no_kernel_lba
+
+    ; 2. Загружаем setup ядра
+    mov si, msg_kernel
+    call print
+
+    mov eax, [kernel_lba]
+    mov cx, 64
+    mov bx, 0x9000
+    mov es, bx
+    xor bx, bx
+    call read_sectors
+    jc disk_error
+
+    ; 3. Проверяем сигнатуру HdrS
+    mov si, msg_check
+    call print
+
+    mov ax, 0x9000
+    mov es, ax
+    mov di, 0x202
+    mov si, hdrs_signature
+    mov cx, 4
+    repe cmpsb
+    jne bad_kernel
+
+    mov si, msg_ok
+    call print
+
+    ; 4. Пробуем передать управление
+    mov si, msg_go
+    call print
+
+    mov dl, [boot_drive]
+    jmp 0x9000:0x0000
+
+.no_kernel_lba:
+    mov si, msg_no_lba
+    call print
+    jmp $
+
+disk_error:
+    mov si, msg_disk_err
+    call print
+    mov al, ah
+    call print_hex
+    jmp $
+
+bad_kernel:
+    mov si, msg_bad_kernel
+    call print
+    jmp $
+
+; --------------------------------------------------
+; Функция чтения секторов через LBA
+read_sectors:
+    pusha
+    mov [dap.lba_low], eax
+    mov [dap.count], cx
+    mov [dap.segment], es
+    mov [dap.offset], bx
+
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    mov si, dap
+    int 0x13
+    popa
+    ret
+
+; Функция печати строки
+print:
+    lodsb
+    or al, al
+    jz .done
+    mov ah, 0x0E
+    int 0x10
+    jmp print
+.done:
+    ret
+
+; Печать hex-байта
+print_hex:
+    push ax
+    shr al, 4
+    call print_nibble
+    pop ax
+    and al, 0x0F
+    call print_nibble
+    ret
+
+print_nibble:
+    cmp al, 10
+    jl .digit
+    add al, 'A' - 10
+    jmp .out
+.digit:
+    add al, '0'
+.out:
+    mov ah, 0x0E
+    int 0x10
+    ret
+
+; --------------------------------------------------
+; Данные
+boot_drive db 0
+
+kernel_lba    dd 0
+kernel_sectors dw 0
+irfs_lba      dd 0
+irfs_sectors  dw 0
+irfs_size     dd 0
+
+dap:
+    .size      db 16
+    .reserved  db 0
+    .count     dw 0
+    .offset    dw 0
+    .segment   dw 0
+    .lba_low   dd 0
+    .lba_high  dd 0
+
+hdrs_signature db 'HdrS'
+
+msg_loader     db 13, 10, 'Loader: Start', 13, 10, 0
+msg_lba        db 'Loader: Check LBA...', 0
+msg_no_lba     db 'No LBA!', 13, 10, 0
+msg_kernel     db 'Loading kernel...', 0
+msg_check      db 'Check...', 0
+msg_ok         db 'OK', 13, 10, 0
+msg_go         db 'Booting!', 13, 10, 0
+msg_disk_err   db 13, 10, 'Disk error: ', 0
+msg_bad_kernel db 13, 10, 'Bad kernel!', 13, 10, 0
+
+cmdline db 'initrd=irfs.gz root=/dev/ram0 rw console=ttyS0', 0
+
+times 8192-($-$$) db 0
