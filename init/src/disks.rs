@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::io::Write;
 use std::fs;
 use std::os::unix::io::FromRawFd;
-use std::process::{Command, Output};
+use std::process::Command;
 use libc;
 
 const EXT2_BIN: &[u8] = include_bytes!("ext2.bin");
@@ -259,7 +259,7 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32) -> R
 }
 
 
-pub fn format_ext2(dev_path: &str) -> Result<(), String> {
+pub fn format_ext2(disk_path: &str) -> Result<(), String> {
     let fd = unsafe { libc::memfd_create(b"ext2\0".as_ptr() as *const i8, 0) };
     if fd < 0 {
         return Err("memfd_create failed".into());
@@ -269,14 +269,15 @@ pub fn format_ext2(dev_path: &str) -> Result<(), String> {
 
     let path = format!("/proc/self/fd/{}", fd);
 
-    let output: Output = Command::new(&path)
-        .arg(dev_path)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = Command::new(&path)
+    .arg(disk_path)
+    .output()
+    .map_err(|e| e.to_string())?;
 
-    if output.status.success() {
-        Ok((println!(" \~E Root paetition formated  on {}", disk_path);))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+	if output.status.success() {
+    	println!("✅ Root partition formatted on {}", disk_path);
+    	Ok(())
+	} else {
+    	Err(String::from_utf8_lossy(&output.stderr).to_string())
+	}
 }

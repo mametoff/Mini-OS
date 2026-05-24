@@ -10,7 +10,6 @@ use disks::format_ext2;
 
 
 fn main() {
-        // Монтируем proc
     if !Path::new("/proc/self").exists() {
         let _ = mount(
             Some("proc"),
@@ -48,8 +47,9 @@ fn main() {
         println!("     MiniOS Installer");
         println!("==================================");
         println!("1) Install MiniOS");
+        println!("2) Rescue mode (Busybox)");
         println!("2) Reboot");
-        print!("\nChoose [1-2]: ");
+        print!("\nChoose [1-3]: ");
         io::stdout().flush().unwrap();
 
         let mut choice = String::new();
@@ -66,6 +66,22 @@ fn main() {
                 }
             }
             "2" => {
+				println!("\n=== Rescue Mode ===");
+				println!("Starting BusyBox shell...");
+				println!("Type 'exit' to return to installer\n");
+
+				match std::process::Command::new("/bin/sh").status() {
+				    Ok(status) => {
+				        if !status.success() {
+				            println!("Shell exited with error code: {:?}", status.code());
+				        }
+				    }
+				    Err(e) => {
+				        println!("Failed to start shell: {}", e);
+				    }
+				}
+            }
+            "3" => {
                 println!("Rebooting...");
                 unsafe { libc::sync(); }
                 unsafe { libc::reboot(0x1234567); }
@@ -153,9 +169,9 @@ println!("\n=== Installation Mode ===");
 
 	let eth0_exists = Path::new("/sys/class/net/eth0").exists();
 	if !eth0_exists {
-	    println!("!!! Eth0  not found");
+	    println!("ALARM: Eth0  not found !!!");
 	} else {
-	    println!("✓ eth0 3xists!");
+	    println!("Eth0 exists!");
 	    let online = match UdpSocket::bind("0.0.0.0:0") {
 			Ok(socket) => {
 				socket.set_read_timeout(Some(Duration::from_secs(2))).ok();
@@ -206,11 +222,121 @@ println!("\n=== Installation Mode ===");
 	std::fs::write("/mnt/etc/fstab", fstab_content).map_err(|e| format!("Failed to write fstab: {}", e))?;
 	println!("✅ fstab created");
 
+// ============================================================
+// Монтирование CD-ROM
+// ============================================================
+println!("\n=== Mounting CD-ROM ===");
 
-				println!("(Implementation coming soon)");
-                println!("\nPress Enter to continue...");
-                let mut _buf = String::new();
-                io::stdin().read_line(&mut _buf).unwrap();
+let cdrom_dev = "/dev/sr0";
+let mount_point = "/cdrom";
+
+match nix::mount::mount(
+    Some(cdrom_dev),
+    mount_point,
+    Some("iso9660"),
+    nix::mount::MsFlags::MS_RDONLY,
+    None::<&str>,
+) {
+    Ok(_) => println!("✅ CD-ROM mounted to {}", mount_point),
+    Err(e) => {
+        return Err(format!("Failed to mount CD-ROM: {}", e));
+    }
+}
+
+// ============================================================
+// Установка загрузчика syslinux на HDD
+// ============================================================
+println!("\n=== Installing syslinux bootloader ===");
+
+let disk_name = &disk.name;
+let boot_dir = "/mnt/boot";
+let syslinux_dir = format!("{}/syslinux", boot_dir);
+
+// 1. Создаём директорию для syslinux
+std::fs::create_dir_all(&syslinux_dir)
+    .map_err(|e| format!("Failed to create {}: {}", syslinux_dir, e))?;
+
+// 2. Копируем ядро с CD-ROM
+let kernel_src = format!("{}/kernel", mount_point);
+let kernel_dst = format!("{}/vmlinuz", boot_dir);
+
+if std::path::Path::new(&kernel_src).exists() {
+    std::fs::copy(&kernel_src, &kernel_dst)
+        .map_err(|e| format!("Failed to copy kernel: {}", e))?;
+    println!("✅ Kernel copied to {}", kernel_dst);
+} else {
+    println!("⚠️ Kernel not found at {}", kernel_src);
+}
+
+// 3. Копируем ldlinux.c32 с CD-ROM
+let ldlinux_src = format!("{}/ldlinux.c32", mount_point);
+let ldlinux_dst = format!("{}/ldlinux.c32", syslinux_dir);
+
+if std::path::Path::new(&ldlinux_src).exists() {
+    std::fs::copy(&ldlinux_src, &ldlinux_dst)
+        .map_err(|e| format!("Failed to copy ldlinux.c32: {}", e))?;
+    println!("✅ ldlinux.c32 copied");
+} else {
+    println!("⚠️ ldlinux.c32 not found at {}", ldlinux_src);
+}
+
+// 4. Создаём syslinux.cfg
+let cfg_content = r#"
+DEFAULT minios
+LABEL minios
+    KERNEL /boot/vmlinuz
+    APPEND root=/dev/sda1 rw console=ttyS0
+
+LABEL rescue
+    KERNEL /boot/vmlinuz
+    APPEND root=/dev/sda1 rw console=ttyS0 init=/bin/sh
+"#;
+
+std::fs::write(format!("{}/syslinux.cfg", syslinux_dir), cfg_content)
+    .map_err(|e| format!("Failed to write syslinux.cfg: {}", e))?;
+println!("✅ syslinux.cfg created");
+
+// 5. Копируем mbr.bin из системы
+let mbr_src = "/usr/share/syslinux/mbr.bin";
+if std::path::Path::new(mbr_src).exists() {
+    let mut mbr_file = std::fs::File::open(mbr_src)
+        .map_err(|e| format!("Failed to open mbr.bin: {}", e))?;
+    
+    let mut mbr_data = Vec::new();
+    std::io::Read::read_to_end(&mut mbr_file, &mut mbr_data)
+        .map_err(|e| format!("Failed to read mbr.bin: {}", e))?;
+    
+    // Записываем mbr.bin в первые 440 байт диска
+    let mut disk = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&format!("/dev/{}", disk_name))
+        .map_err(|e| format!("Failed to open disk: {}", e))?;
+    
+    disk.write_all(&mbr_data[..440])
+        .map_err(|e| format!("Failed to write MBR boot code: {}", e))?;
+    println!("✅ MBR boot code written");
+} else {
+    println!("⚠️ mbr.bin not found at {}", mbr_src);
+}
+
+// 6. Устанавливаем extlinux на корневой раздел
+let extlinux_path = "/usr/bin/extlinux";
+if std::path::Path::new(extlinux_path).exists() {
+    let status = std::process::Command::new(extlinux_path)
+        .args(["--install", &syslinux_dir])
+        .status()
+        .map_err(|e| format!("Failed to run extlinux: {}", e))?;
+    
+    if status.success() {
+        println!("✅ extlinux installed to {}", syslinux_dir);
+    } else {
+        println!("⚠️ extlinux install failed");
+    }
+} else {
+    println!("⚠️ extlinux not found at {}", extlinux_path);
+}
+
+println!("✅ Bootloader installation completed");
 
 	Ok(())
 }

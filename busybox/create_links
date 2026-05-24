@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# Скрипт для создания символических ссылок на busybox в текущей директории
+
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Получение списка всех команд busybox
+echo -e "${YELLOW}Получение списка команд busybox...${NC}"
+COMMANDS=$(qemu-x86_64-static ./busybox --list)
+
+if [ -z "$COMMANDS" ]; then
+    echo -e "${RED}Ошибка: не удалось получить список команд${NC}"
+    exit 1
+fi
+
+COMMAND_COUNT=$(echo "$COMMANDS" | wc -w)
+echo -e "${GREEN}Найдено команд: $COMMAND_COUNT${NC}"
+echo ""
+
+# Создание символических ссылок
+echo -e "${YELLOW}Создание символических ссылок в $(pwd)...${NC}"
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+for cmd in $COMMANDS; do
+    # Пропускаем самого busybox
+    if [ "$cmd" = "busybox" ]; then
+        continue
+    fi
+    
+    # Пропускаем, если ссылка уже существует и ведет к нашему busybox
+    if [ -L "$cmd" ] && [ "$(readlink "$cmd")" = "busybox" ]; then
+        echo -e "  ${GREEN}✓${NC} $cmd уже существует (правильная ссылка)"
+        ((SKIP_COUNT++))
+        continue
+    fi
+    
+    # Если существует файл/директория (не ссылка)
+    if [ -e "$cmd" ] && [ ! -L "$cmd" ]; then
+        echo -e "  ${RED}✗${NC} $cmd существует как обычный файл/директория, пропускаем"
+        ((FAIL_COUNT++))
+        continue
+    fi
+    
+    # Если существует старая ссылка на другое место, удаляем её
+    if [ -L "$cmd" ]; then
+        echo -e "  ${YELLOW}⚠${NC} $cmd ссылается на другое место, пересоздаём..."
+        rm -f "$cmd"
+    fi
+    
+    # Создаем символическую ссылку
+    if ln -s busybox "$cmd" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} $cmd создана"
+        ((SUCCESS_COUNT++))
+    else
+        echo -e "  ${RED}✗${NC} $cmd не удалось создать"
+        ((FAIL_COUNT++))
+    fi
+done
+
+# Итоговая статистика
+echo ""
+echo -e "${GREEN}========== ИТОГ ==========${NC}"
+echo -e "${GREEN}Создано:${NC} $SUCCESS_COUNT"
+echo -e "${YELLOW}Пропущено (уже существуют):${NC} $SKIP_COUNT"
+echo -e "${RED}Ошибок/Конфликтов:${NC} $FAIL_COUNT"
+echo -e "${GREEN}Всего обработано:${NC} $COMMAND_COUNT"
+
+if [ $FAIL_COUNT -eq 0 ]; then
+    echo -e "${GREEN}✅ Все ссылки успешно созданы!${NC}"
+else
+    echo -e "${YELLOW}⚠ Некоторые ссылки не были созданы из-за конфликта имён${NC}"
+fi
+
+echo ""
+echo -e "Проверить можно командой: ls -la | grep '^l' | head -20"
