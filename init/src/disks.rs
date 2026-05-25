@@ -4,14 +4,21 @@
 // ============================================================
 
 use nix::mount::{mount, MsFlags};
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, File};
 use mbrman::{MBR, MBRPartitionEntry, CHS};
 use std::time::Duration;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::fs;
 use std::os::unix::io::FromRawFd;
 use std::process::Command;
 use libc;
+use std::path::Path;
+use reqwest::blocking::Client;
+use reqwest::header::USER_AGENT;
+use sha2::{Sha256, Digest};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 const EXT2_BIN: &[u8] = include_bytes!("ext2.bin");
 
@@ -211,54 +218,6 @@ pub fn create_swap(partition_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-
-pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32) -> Result<(), String> {
-    for attempt in 1..=max_attempts {
-        println!("Download attempt {}/{}...", attempt, max_attempts);
-        
-        // Создаём клиент с большими таймаутами
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(120))      // 2 минуты на весь запрос
-            .connect_timeout(Duration::from_secs(30)) // 30 секунд на соединение
-            .build()
-            .map_err(|e| format!("Failed to build client: {}", e))?;
-        
-        match client.get(url).send() {
-            Ok(response) => {
-                if !response.status().is_success() {
-                    println!("HTTP error: {}, retrying...", response.status());
-                    continue;
-                }
-                
-                match response.bytes() {
-                    Ok(bytes) => {
-                        if let Err(e) = std::fs::write(output_path, &bytes) {
-                            println!("Write error: {}, retrying...", e);
-                            continue;
-                        }
-                        println!("✅ Downloaded {} bytes on attempt {}", bytes.len(), attempt);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("Read error: {}, retrying...", e);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Connection error: {}, retrying...", e);
-            }
-        }
-        
-        if attempt < max_attempts {
-            println!("Waiting 5 seconds before next attempt...");
-            std::thread::sleep(Duration::from_secs(5));
-        }
-    }
-    
-    Err(format!("Failed to download after {} attempts", max_attempts))
-}
-
-
 pub fn format_ext2(disk_path: &str) -> Result<(), String> {
     let fd = unsafe { libc::memfd_create(b"ext2\0".as_ptr() as *const i8, 0) };
     if fd < 0 {
@@ -280,4 +239,127 @@ pub fn format_ext2(disk_path: &str) -> Result<(), String> {
 	} else {
     	Err(String::from_utf8_lossy(&output.stderr).to_string())
 	}
+}
+
+pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expected_sha256: &str) -> Result<(), String> {
+    let output_dir = Path::new(output_path).parent().unwrap();
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| format!("Failed to create directory {}: {}", output_dir.display(), e))?;
+    
+    for attempt in 1..=max_attempts {
+        println!("Download attempt {}/{}...", attempt, max_attempts);
+        
+        let client = Client::builder()
+            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+        
+        // Получаем размер файла для прогресс-бара
+        let head_response = client.head(url).send();
+        let total_size = match head_response {
+            Ok(resp) => resp.content_length().unwrap_or(0),
+            Err(_) => 0,
+        };
+        
+        // Скачиваем с прогресс-баром
+        let mut response = client.get(url)
+            .header(USER_AGENT, "minios-installer/0.1")
+            .send()
+            .map_err(|e| format!("Request failed: {}", e))?;
+        
+        if !response.status().is_success() {
+            println!("HTTP error: {}, retrying...", response.status());
+            continue;
+        }
+        
+        let total_size = total_size.max(response.content_length().unwrap_or(0));
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let downloaded_clone = downloaded.clone();
+        
+        // Поток для отображения прогресса
+        let progress_handle = if total_size > 0 {
+            Some(thread::spawn(move || {
+                loop {
+                    let current = downloaded_clone.load(Ordering::Relaxed);
+                    if current >= total_size {
+                        break;
+                    }
+                    let percent = (current * 100) / total_size;
+                    let bars = (percent / 2) as usize;
+                    print!("\rProgress: [");
+                    for _ in 0..bars { print!("="); }
+                    for _ in bars..50 { print!(" "); }
+                    print!("] {}% ({}/{}) bytes", percent, current, total_size);
+                    std::io::stdout().flush().unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                println!();
+            }))
+        } else {
+            None
+        };
+        
+        // Сохраняем во временный файл
+        let temp_path = format!("{}.tmp", output_path);
+        let mut file = File::create(&temp_path)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        
+        let mut buffer = [0u8; 8192];
+        let mut bytes_written = 0u64;
+        
+        loop {
+            let bytes_read = response.read(&mut buffer)
+                .map_err(|e| format!("Failed to read response: {}", e))?;
+            if bytes_read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..bytes_read])
+                .map_err(|e| format!("Failed to write to file: {}", e))?;
+            bytes_written += bytes_read as u64;
+            downloaded.store(bytes_written, Ordering::Relaxed);
+        }
+        
+        file.flush().map_err(|e| format!("Failed to flush file: {}", e))?;
+        
+        if let Some(handle) = progress_handle {
+            handle.join().unwrap();
+        }
+        
+        // Проверяем SHA256
+        let mut hasher = Sha256::new();
+        let mut file = File::open(&temp_path)
+            .map_err(|e| format!("Failed to open temp file for checksum: {}", e))?;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let bytes_read = file.read(&mut buffer)
+                .map_err(|e| format!("Failed to read for checksum: {}", e))?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        
+        let actual_hash = format!("{:x}", hasher.finalize());
+        
+        if actual_hash != expected_sha256 {
+            println!("Checksum mismatch! Expected {}, got {}", expected_sha256, actual_hash);
+            std::fs::remove_file(&temp_path).ok();
+            if attempt < max_attempts {
+                println!("Retrying...");
+                continue;
+            } else {
+                return Err(format!("Checksum mismatch after {} attempts", max_attempts));
+            }
+        }
+        
+        // Успех: перемещаем временный файл в конечный
+        std::fs::rename(&temp_path, output_path)
+            .map_err(|e| format!("Failed to rename temp file: {}", e))?;
+        
+        println!("✅ Downloaded {} bytes, checksum OK", bytes_written);
+        return Ok(());
+    }
+    
+    Err(format!("Failed to download after {} attempts", max_attempts))
 }

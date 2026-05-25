@@ -171,7 +171,7 @@ println!("\n=== Installation Mode ===");
 	if !eth0_exists {
 	    println!("ALARM: Eth0  not found !!!");
 	} else {
-	    println!("Eth0 exists!");
+	    println!("✅  Eth0 exists!");
 	    let online = match UdpSocket::bind("0.0.0.0:0") {
 			Ok(socket) => {
 				socket.set_read_timeout(Some(Duration::from_secs(2))).ok();
@@ -198,9 +198,10 @@ println!("\n=== Installation Mode ===");
 
 	let url = "https://github.com/Mini-OS/Mini-OS/raw/refs/heads/main/rootfs/rootfs.tar.gz";
 	let output_path = "/install/rootfs.tar.gz";
-	std::fs::create_dir_all("/install").map_err(|e| format!("Failed to create /install: {}", e))?;
+	let expected_sha256 = "3538750688079ab5144645e81a93652c1ed4b9572dc3fd8669ccac8cb080f987";
 
-	download_with_retry(url, output_path, 5)?;
+	download_with_retry(url, output_path, 5, expected_sha256)?;
+
 	println!("✅ Download completed");
 
 	println!("\n=== Extracting rootfs ===");
