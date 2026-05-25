@@ -7,7 +7,7 @@ use std::net::UdpSocket;
 use std::time::Duration;
 use disks::download_with_retry;
 use disks::format_ext2;
-
+use std::fs;
 
 fn main() {
     if !Path::new("/proc/self").exists() {
@@ -243,100 +243,140 @@ match nix::mount::mount(
     }
 }
 
+// После распаковки rootfs и настройки fstab
+	println!("\n=== Installing bootloader ===");
+	if let Err(e) = install_syslinux("/dev/sda", 1, "/mnt", "/cdrom") {
+    	println!("Bootloader installation failed: {}", e);
+	    return Err(e);
+	}
+
+	Ok(())
+}
+
+
 // ============================================================
 // Установка загрузчика syslinux на HDD
 // ============================================================
-println!("\n=== Installing syslinux bootloader ===");
 
-let disk_name = &disk.name;
-let boot_dir = "/mnt/boot";
-let syslinux_dir = format!("{}/syslinux", boot_dir);
+	fn write_extlinux_conf(extlinux_dir: &Path, boot_part: u8) -> Result<(), String> {
+	    let conf = format!(
+	        "DEFAULT minios\n\
+	         TIMEOUT 0\n\
+	         PROMPT 0\n\
+	         \n\
+	         LABEL minios\n\
+	         \x20   LINUX /boot/kernel\n\
+	         \x20   APPEND root=/dev/sda{} rw console=ttyS0\n\
+	         \n\
+	         LABEL rescue\n\
+	         \x20   LINUX /boot/kernel\n\
+	         \x20   APPEND root=/dev/sda{} rw console=ttyS0 init=/bin/sh\n",
+	        boot_part, boot_part
+	    );
+	    fs::write(extlinux_dir.join("extlinux.conf"), &conf)
+	        .map_err(|e| format!("Failed to write extlinux.conf: {}", e))?;
+	    println!("  extlinux.conf written");
+	    Ok(())
+	}
 
-// 1. Создаём директорию для syslinux
-std::fs::create_dir_all(&syslinux_dir)
-    .map_err(|e| format!("Failed to create {}: {}", syslinux_dir, e))?;
+	fn install_syslinux(disk_dev: &str, boot_part: u8, target_root: &str, cdrom_path: &str) -> Result<(), String> {
+	    let target_boot = Path::new(target_root).join("boot");
+	    let target_extlinux = Path::new(target_root).join("extlinux");
+	    let bl_dir = Path::new("/bootloader");
 
-// 2. Копируем ядро с CD-ROM
-let kernel_src = format!("{}/kernel", mount_point);
-let kernel_dst = format!("{}/vmlinuz", boot_dir);
+	    println!("=== Syslinux Installer ===");
+	    println!("target root:   {}", target_root);
+	    println!("target device: {}", disk_dev);
 
-if std::path::Path::new(&kernel_src).exists() {
-    std::fs::copy(&kernel_src, &kernel_dst)
-        .map_err(|e| format!("Failed to copy kernel: {}", e))?;
-    println!("✅ Kernel copied to {}", kernel_dst);
-} else {
-    println!("⚠️ Kernel not found at {}", kernel_src);
-}
+	    // 1. Создаём директории
+	    fs::create_dir_all(&target_boot)
+	        .map_err(|e| format!("Failed to create {}: {}", target_boot.display(), e))?;
+	    fs::create_dir_all(&target_extlinux)
+	        .map_err(|e| format!("Failed to create {}: {}", target_extlinux.display(), e))?;
 
-// 3. Копируем ldlinux.c32 с CD-ROM
-let ldlinux_src = format!("{}/ldlinux.c32", mount_point);
-let ldlinux_dst = format!("{}/ldlinux.c32", syslinux_dir);
+	    // 2. Копируем ядро с CD-ROM
+	    let kernel_src = Path::new(cdrom_path).join("kernel");
+	    let kernel_dst = target_boot.join("kernel");
+	    if kernel_src.exists() {
+	        fs::copy(&kernel_src, &kernel_dst)
+	            .map_err(|e| format!("Failed to copy kernel: {}", e))?;
+	        println!("  kernel -> /boot/kernel");
+	    } else {
+	        println!("⚠️ Kernel not found at {}", kernel_src.display());
+	    }
 
-if std::path::Path::new(&ldlinux_src).exists() {
-    std::fs::copy(&ldlinux_src, &ldlinux_dst)
-        .map_err(|e| format!("Failed to copy ldlinux.c32: {}", e))?;
-    println!("✅ ldlinux.c32 copied");
-} else {
-    println!("⚠️ ldlinux.c32 not found at {}", ldlinux_src);
-}
+	    // 3. Копируем модули extlinux с CD-ROM
+	    let modules = ["ldlinux.c32", "libcom32.c32", "libutil.c32", "menu.c32", "vesamenu.c32"];
+	    for module in &modules {
+	        let src = Path::new(cdrom_path).join(module);
+	        let dst = target_extlinux.join(module);
+	        if src.exists() {
+	            fs::copy(&src, &dst)
+	                .map_err(|e| format!("Failed to copy {}: {}", module, e))?;
+	        }
+	    }
+	    println!("  extlinux modules copied");
 
-// 4. Создаём syslinux.cfg
-let cfg_content = r#"
-DEFAULT minios
-LABEL minios
-    KERNEL /boot/vmlinuz
-    APPEND root=/dev/sda1 rw console=ttyS0
+	    // 4. Записываем конфигурацию
+	    write_extlinux_conf(&target_extlinux, boot_part)?;
 
-LABEL rescue
-    KERNEL /boot/vmlinuz
-    APPEND root=/dev/sda1 rw console=ttyS0 init=/bin/sh
-"#;
+		println!("  Installing ldlinux.sys manually...");
 
-std::fs::write(format!("{}/syslinux.cfg", syslinux_dir), cfg_content)
-    .map_err(|e| format!("Failed to write syslinux.cfg: {}", e))?;
-println!("✅ syslinux.cfg created");
+		// ldlinux.sys лежит в папке /bootloader в нашем initramfs
+		let ldlinux_sys_src = Path::new("/bootloader").join("ldlinux.sys");
+		let ldlinux_sys_dst = target_extlinux.join("ldlinux.sys");
 
-// 5. Копируем mbr.bin из системы
-let mbr_src = "/usr/share/syslinux/mbr.bin";
-if std::path::Path::new(mbr_src).exists() {
-    let mut mbr_file = std::fs::File::open(mbr_src)
-        .map_err(|e| format!("Failed to open mbr.bin: {}", e))?;
-    
-    let mut mbr_data = Vec::new();
-    std::io::Read::read_to_end(&mut mbr_file, &mut mbr_data)
-        .map_err(|e| format!("Failed to read mbr.bin: {}", e))?;
-    
-    // Записываем mbr.bin в первые 440 байт диска
-    let mut disk = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&format!("/dev/{}", disk_name))
-        .map_err(|e| format!("Failed to open disk: {}", e))?;
-    
-    disk.write_all(&mbr_data[..440])
-        .map_err(|e| format!("Failed to write MBR boot code: {}", e))?;
-    println!("✅ MBR boot code written");
-} else {
-    println!("⚠️ mbr.bin not found at {}", mbr_src);
-}
+		if !ldlinux_sys_src.exists() {
+		    return Err(format!("ldlinux.sys not found at {}", ldlinux_sys_src.display()));
+		}
 
-// 6. Устанавливаем extlinux на корневой раздел
-let extlinux_path = "/usr/bin/extlinux";
-if std::path::Path::new(extlinux_path).exists() {
-    let status = std::process::Command::new(extlinux_path)
-        .args(["--install", &syslinux_dir])
-        .status()
-        .map_err(|e| format!("Failed to run extlinux: {}", e))?;
-    
-    if status.success() {
-        println!("✅ extlinux installed to {}", syslinux_dir);
-    } else {
-        println!("⚠️ extlinux install failed");
-    }
-} else {
-    println!("⚠️ extlinux not found at {}", extlinux_path);
-}
+		fs::copy(&ldlinux_sys_src, &ldlinux_sys_dst)
+		    .map_err(|e| format!("Failed to copy ldlinux.sys to extlinux dir: {}", e))?;
 
-println!("✅ Bootloader installation completed");
+		// Копируем также в корень раздела
+		let ldlinux_sys_root = Path::new(target_root).join("ldlinux.sys");
+		fs::copy(&ldlinux_sys_src, &ldlinux_sys_root)
+		    .map_err(|e| format!("Failed to copy ldlinux.sys to root: {}", e))?;
 
-	Ok(())
+		// Устанавливаем атрибут "immutable" (если есть chattr)
+		let _ = std::process::Command::new("chattr")
+		    .args(["+i", &ldlinux_sys_root.to_string_lossy()])
+		    .status();
+
+		println!("  ldlinux.sys copied and protected");
+		
+	    // 6. Устанавливаем MBR (altmbr.bin)
+	    let mbr_src = bl_dir.join("mbr").join("altmbr.bin");
+	    if !mbr_src.exists() {
+	        return Err(format!("altmbr.bin not found at {}", mbr_src.display()));
+	    }
+	    
+	    let mbr_data = fs::read(&mbr_src)
+	        .map_err(|e| format!("Failed to read altmbr.bin: {}", e))?;
+	    
+	    if mbr_data.len() < 438 {
+	        return Err("altmbr.bin too short".to_string());
+	    }
+	    
+	    let mut patched = mbr_data.clone();
+	    patched[437] = boot_part;  // Патчим байт 437 номером раздела
+	    
+	    let mut disk = std::fs::OpenOptions::new()
+	        .write(true)
+	        .open(disk_dev)
+	        .map_err(|e| format!("Failed to open {}: {}", disk_dev, e))?;
+	    
+	    use std::io::Write;
+	    disk.write_all(&patched[..440])
+	        .map_err(|e| format!("Failed to write MBR: {}", e))?;
+	    
+	    println!("  altmbr.bin (partition {}) written to {}", boot_part, disk_dev);
+	    println!("=== Done ===");
+	    Ok(())
+	}
+
+	fn manual_copy_ldlinux(extlinux_dir: &Path, target_root: &str, cdrom_path: &str) -> Result<(), String> {
+
+
+Ok(())
 }
