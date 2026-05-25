@@ -374,9 +374,3 @@ match nix::mount::mount(
 	    println!("=== Done ===");
 	    Ok(())
 	}
-
-	fn manual_copy_ldlinux(extlinux_dir: &Path, target_root: &str, cdrom_path: &str) -> Result<(), String> {
-
-
-Ok(())
-}
