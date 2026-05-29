@@ -1,16 +1,37 @@
-## Hi there 👋
+<!-- 🌈 Animated Gradient Techno Header for Mini OS -->
+<div align="center">
 
-<!--
-**Mini-OS/Mini-OS** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
+<style>
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+.gradient-text {
+  font-family: monospace;
+  font-size: 18px;
+  font-weight: bold;
+  background: linear-gradient(270deg, #ff6600, #ffcc00, #00ccff, #ff00ff);
+  background-size: 800% 800%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gradientShift 8s ease infinite;
+}
+</style>
 
-Here are some ideas to get you started:
+<pre class="gradient-text">
+███╗   ███╗██╗███╗   ██╗██╗     ██╗ ██████╗ ███████╗
+████╗ ████║██║████╗  ██║██║     ██║██╔═══██╗██╔════╝
+██╔████╔██║██║██╔██╗ ██║██║     ██║██║   ██║███████╗
+██║╚██╔╝██║██║██║╚██╗██║██║     ██║██║   ██║╚════██║
+██║ ╚═╝ ██║██║██║ ╚████║███████╗██║╚██████╔╝███████║
+╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝╚═╝ ╚═════╝ ╚══════╝
+</pre>
 
-- 🔭 I’m currently working on ...
-- 🌱 I’m currently learning ...
-- 👯 I’m looking to collaborate on ...
-- 🤔 I’m looking for help with ...
-- 💬 Ask me about ...
-- 📫 How to reach me: ...
-- 😄 Pronouns: ...
-- ⚡ Fun fact: ...
--->
+### ⚙️ **Mini OS** — Lightweight Rust‑based System  
+> 🧩 Built for speed, modularity, and simplicity  
+> 💡 Powered by Rust, designed for embedded and virtual environments  
+
+![Mini OS Logo](logo.jpeg)
+
+</div>
