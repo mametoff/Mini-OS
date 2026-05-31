@@ -1,13 +1,15 @@
 mod disks;
 
 use std::io::{self, Write};
+use std::os::unix::fs::symlink;
 use nix::mount::{mount, MsFlags};
 use std::path::Path;
 use std::net::UdpSocket;
 use std::time::Duration;
 use disks::download_with_retry;
 use disks::disk_staff;
-use std::fs;
+
+
 
 fn main() {
     if !Path::new("/proc/self").exists() {
@@ -48,7 +50,7 @@ fn main() {
         println!("==================================");
         println!("1) Install MiniOS");
         println!("2) Rescue mode (Busybox)");
-        println!("2) Reboot");
+        println!("3) Reboot");
         print!("\nChoose [1-3]: ");
         io::stdout().flush().unwrap();
 
@@ -162,14 +164,59 @@ println!("\n=== Installation Mode ===");
 	println!("✅ Download completed");
 
 	println!("\n=== Extracting rootfs ===");
-	let tar_gz = std::fs::File::open(output_path).map_err(|e| format!("Failed to open {}: {}", output_path, e))?;
 
-	let tar = flate2::read::GzDecoder::new(tar_gz);
-	let mut archive = tar::Archive::new(tar);
+	const DOTS9: &[&str] = &["⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"];
+	let mut frame = 0usize;
+	let mut last_update = std::time::Instant::now();
 
-	archive.unpack("/mnt").map_err(|e| format!("Failed to extract: {}", e))?;
+	let entries = tar_light::list_entry(output_path)
+	    .map_err(|e| format!("Failed to read archive '{}': {}", output_path, e))?;
+	let total = entries.len();
 
-	println!("✅ Extracted to /mnt");
+	for (i, entry) in entries.iter().enumerate() {
+	    let mut name = entry.header.name.clone();
+	    while name.starts_with('/') {
+	        name = name[1..].to_string();
+	    }
+	    let stripped = name.trim_start_matches('/');
+	    if stripped.is_empty() || stripped.split('/').any(|p| p == "..") {
+	        continue;
+	    }
+
+	    let dst = Path::new("/mnt").join(stripped);
+
+	    if entry.header.typeflag == b'5' {
+	        std::fs::create_dir_all(&dst)
+	            .map_err(|e| format!("Failed to create dir {}: {}", dst.display(), e))?;
+	    } else if entry.header.typeflag == b'2' {
+	        if let Some(parent) = dst.parent() {
+	            std::fs::create_dir_all(parent)
+	                .map_err(|e| format!("Failed to create parent for {}: {}", dst.display(), e))?;
+	        }
+	        symlink(&entry.header.linkname, &dst)
+	            .map_err(|e| format!("Failed to create symlink {}: {}", dst.display(), e))?;
+	    } else {
+	        if let Some(parent) = dst.parent() {
+	            std::fs::create_dir_all(parent)
+	                .map_err(|e| format!("Failed to create parent for {}: {}", dst.display(), e))?;
+	        }
+	        std::fs::write(&dst, &entry.data)
+	            .map_err(|e| format!("Failed to write {}: {}", dst.display(), e))?;
+	    }
+
+	    if last_update.elapsed() >= std::time::Duration::from_millis(80) {
+	        let pct = (i + 1) * 100 / total;
+	        let filled = (pct * 25 / 100).min(25) as usize;
+	        let bar: String = (0..25).map(|j| if j < filled { '=' } else { ' ' }).collect();
+	        eprint!("\r{} Extracting rootfs... [{}] {}%",
+	            DOTS9[frame % DOTS9.len()], bar, pct);
+	        frame = (frame + 1) % DOTS9.len();
+	        last_update = std::time::Instant::now();
+	    }
+	}
+
+	eprintln!("\r\x1b[32m✓\x1b[0m Extracting rootfs... Done");
+	println!(" Extracted to /mnt");
 
 	println!("\n=== Cleaning up ===");
 	std::fs::remove_dir_all("/install").map_err(|e| format!("Failed to remove /install: {}", e))?;
@@ -180,155 +227,5 @@ println!("\n=== Installation Mode ===");
 	std::fs::write("/mnt/etc/fstab", fstab_content).map_err(|e| format!("Failed to write fstab: {}", e))?;
 	println!("✅ fstab created");
 
-// ============================================================
-// Монтирование CD-ROM
-// ============================================================
-println!("\n=== Mounting CD-ROM ===");
-
-let cdrom_dev = "/dev/sr0";
-let mount_point = "/cdrom";
-
-match nix::mount::mount(
-    Some(cdrom_dev),
-    mount_point,
-    Some("iso9660"),
-    nix::mount::MsFlags::MS_RDONLY,
-    None::<&str>,
-) {
-    Ok(_) => println!("✅ CD-ROM mounted to {}", mount_point),
-    Err(e) => {
-        return Err(format!("Failed to mount CD-ROM: {}", e));
-    }
-}
-
-// После распаковки rootfs и настройки fstab
-	println!("\n=== Installing bootloader ===");
-	if let Err(e) = install_syslinux("/dev/sda", 1, "/mnt", "/cdrom") {
-    	println!("Bootloader installation failed: {}", e);
-	    return Err(e);
-	}
-
 	Ok(())
-}
-
-
-// ============================================================
-// Установка загрузчика syslinux на HDD
-// ============================================================
-
-	fn write_extlinux_conf(extlinux_dir: &Path, boot_part: u8) -> Result<(), String> {
-	    let conf = format!(
-	        "DEFAULT minios\n\
-	         TIMEOUT 0\n\
-	         PROMPT 0\n\
-	         \n\
-	         LABEL minios\n\
-	         \x20   LINUX /boot/kernel\n\
-	         \x20   APPEND root=/dev/sda{} rw console=ttyS0\n\
-	         \n\
-	         LABEL rescue\n\
-	         \x20   LINUX /boot/kernel\n\
-	         \x20   APPEND root=/dev/sda{} rw console=ttyS0 init=/bin/sh\n",
-	        boot_part, boot_part
-	    );
-	    fs::write(extlinux_dir.join("extlinux.conf"), &conf)
-	        .map_err(|e| format!("Failed to write extlinux.conf: {}", e))?;
-	    println!("  extlinux.conf written");
-	    Ok(())
-	}
-
-	fn install_syslinux(disk_dev: &str, boot_part: u8, target_root: &str, cdrom_path: &str) -> Result<(), String> {
-	    let target_boot = Path::new(target_root).join("boot");
-	    let target_extlinux = Path::new(target_root).join("extlinux");
-	    let bl_dir = Path::new("/bootloader");
-
-	    println!("=== Syslinux Installer ===");
-	    println!("target root:   {}", target_root);
-	    println!("target device: {}", disk_dev);
-
-	    // 1. Создаём директории
-	    fs::create_dir_all(&target_boot)
-	        .map_err(|e| format!("Failed to create {}: {}", target_boot.display(), e))?;
-	    fs::create_dir_all(&target_extlinux)
-	        .map_err(|e| format!("Failed to create {}: {}", target_extlinux.display(), e))?;
-
-	    // 2. Копируем ядро с CD-ROM
-	    let kernel_src = Path::new(cdrom_path).join("kernel");
-	    let kernel_dst = target_boot.join("kernel");
-	    if kernel_src.exists() {
-	        fs::copy(&kernel_src, &kernel_dst)
-	            .map_err(|e| format!("Failed to copy kernel: {}", e))?;
-	        println!("  kernel -> /boot/kernel");
-	    } else {
-	        println!("⚠️ Kernel not found at {}", kernel_src.display());
-	    }
-
-	    // 3. Копируем модули extlinux с CD-ROM
-	    let modules = ["ldlinux.c32", "libcom32.c32", "libutil.c32", "menu.c32", "vesamenu.c32"];
-	    for module in &modules {
-	        let src = Path::new(cdrom_path).join(module);
-	        let dst = target_extlinux.join(module);
-	        if src.exists() {
-	            fs::copy(&src, &dst)
-	                .map_err(|e| format!("Failed to copy {}: {}", module, e))?;
-	        }
-	    }
-	    println!("  extlinux modules copied");
-
-	    // 4. Записываем конфигурацию
-	    write_extlinux_conf(&target_extlinux, boot_part)?;
-
-		println!("  Installing ldlinux.sys manually...");
-
-		// ldlinux.sys лежит в папке /bootloader в нашем initramfs
-		let ldlinux_sys_src = Path::new("/bootloader").join("ldlinux.sys");
-		let ldlinux_sys_dst = target_extlinux.join("ldlinux.sys");
-
-		if !ldlinux_sys_src.exists() {
-		    return Err(format!("ldlinux.sys not found at {}", ldlinux_sys_src.display()));
-		}
-
-		fs::copy(&ldlinux_sys_src, &ldlinux_sys_dst)
-		    .map_err(|e| format!("Failed to copy ldlinux.sys to extlinux dir: {}", e))?;
-
-		// Копируем также в корень раздела
-		let ldlinux_sys_root = Path::new(target_root).join("ldlinux.sys");
-		fs::copy(&ldlinux_sys_src, &ldlinux_sys_root)
-		    .map_err(|e| format!("Failed to copy ldlinux.sys to root: {}", e))?;
-
-		// Устанавливаем атрибут "immutable" (если есть chattr)
-		let _ = std::process::Command::new("chattr")
-		    .args(["+i", &ldlinux_sys_root.to_string_lossy()])
-		    .status();
-
-		println!("  ldlinux.sys copied and protected");
-		
-	    // 6. Устанавливаем MBR (altmbr.bin)
-	    let mbr_src = bl_dir.join("mbr").join("altmbr.bin");
-	    if !mbr_src.exists() {
-	        return Err(format!("altmbr.bin not found at {}", mbr_src.display()));
-	    }
-	    
-	    let mbr_data = fs::read(&mbr_src)
-	        .map_err(|e| format!("Failed to read altmbr.bin: {}", e))?;
-	    
-	    if mbr_data.len() < 438 {
-	        return Err("altmbr.bin too short".to_string());
-	    }
-	    
-	    let mut patched = mbr_data.clone();
-	    patched[437] = boot_part;  // Патчим байт 437 номером раздела
-	    
-	    let mut disk = std::fs::OpenOptions::new()
-	        .write(true)
-	        .open(disk_dev)
-	        .map_err(|e| format!("Failed to open {}: {}", disk_dev, e))?;
-	    
-	    use std::io::Write;
-	    disk.write_all(&patched[..440])
-	        .map_err(|e| format!("Failed to write MBR: {}", e))?;
-	    
-	    println!("  altmbr.bin (partition {}) written to {}", boot_part, disk_dev);
-	    println!("=== Done ===");
-	    Ok(())
 	}

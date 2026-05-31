@@ -5,9 +5,6 @@ use std::path::Path;
 use reqwest::blocking::Client;
 use reqwest::header::USER_AGENT;
 use sha2::{Sha256, Digest};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::thread;
 use std::fs::File;
 use std::io;
 use std::error::Error;
@@ -99,13 +96,34 @@ pub fn find_first_disk() -> Option<Disk> {
 
 // Donloading with retries
 
+const DOTS9_FRAMES: &[&str] = &["⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"];
+const BAR_WIDTH: usize = 25;
+
+fn progress_bar(pct: u64) -> String {
+    let filled = (pct * BAR_WIDTH as u64 / 100).min(BAR_WIDTH as u64) as usize;
+    let mut bar = String::with_capacity(BAR_WIDTH + 2);
+    bar.push('[');
+    for i in 0..BAR_WIDTH {
+        bar.push(if i < filled { '=' } else { ' ' });
+    }
+    bar.push(']');
+    bar
+}
+
+fn spinner_tick(frame: &mut usize) -> &'static str {
+    let f = DOTS9_FRAMES[*frame % DOTS9_FRAMES.len()];
+    *frame = (*frame + 1) % DOTS9_FRAMES.len();
+    f
+}
+
 pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expected_sha256: &str) -> Result<(), String> {
     let output_dir = Path::new(output_path).parent().unwrap();
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create directory {}: {}", output_dir.display(), e))?;
     
     for attempt in 1..=max_attempts {
-        println!("Download attempt {}/{}...", attempt, max_attempts);
+        let mut frame = 0usize;
+        eprint!("\r{} Download attempt {}/{}...", spinner_tick(&mut frame), attempt, max_attempts);
         
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
@@ -113,7 +131,6 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
         
-        // Получаем размер файла для прогресс-бара
         let head_response = client.head(url).send();
         let total_size = match head_response {
             Ok(resp) => resp.content_length().unwrap_or(0),
@@ -126,35 +143,13 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             .map_err(|e| format!("Request failed: {}", e))?;
         
         if !response.status().is_success() {
-            println!("HTTP error: {}, retrying...", response.status());
+            eprintln!("\r\x1b[31m✗\x1b[0m Download attempt {}/{}... HTTP error {}",
+                attempt, max_attempts, response.status());
+            println!("Retrying...");
             continue;
         }
         
         let total_size = total_size.max(response.content_length().unwrap_or(0));
-        let downloaded = Arc::new(AtomicU64::new(0));
-        let downloaded_clone = downloaded.clone();
-        
-        let progress_handle = if total_size > 0 {
-            Some(thread::spawn(move || {
-                loop {
-                    let current = downloaded_clone.load(Ordering::Relaxed);
-                    if current >= total_size {
-                        break;
-                    }
-                    let percent = (current * 100) / total_size;
-                    let bars = (percent / 2) as usize;
-                    print!("\rProgress: [");
-                    for _ in 0..bars { print!("="); }
-                    for _ in bars..50 { print!(" "); }
-                    print!("] {}% ({}/{}) bytes", percent, current, total_size);
-                    std::io::stdout().flush().unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-                println!();
-            }))
-        } else {
-            None
-        };
         
         let temp_path = format!("{}.tmp", output_path);
         let mut file = File::create(&temp_path)
@@ -162,6 +157,7 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
         
         let mut buffer = [0u8; 8192];
         let mut bytes_written = 0u64;
+        let mut last_update = std::time::Instant::now();
         
         loop {
             let bytes_read = response.read(&mut buffer)
@@ -172,14 +168,25 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             file.write_all(&buffer[..bytes_read])
                 .map_err(|e| format!("Failed to write to file: {}", e))?;
             bytes_written += bytes_read as u64;
-            downloaded.store(bytes_written, Ordering::Relaxed);
+            
+            if last_update.elapsed() >= std::time::Duration::from_millis(80) {
+                let frame_char = spinner_tick(&mut frame);
+                if total_size > 0 {
+                    let pct = bytes_written * 100 / total_size;
+                    eprint!("\r{} Download attempt {}/{}... {} {}% ({} MB)",
+                        frame_char, attempt, max_attempts,
+                        progress_bar(pct), pct, bytes_written / 1_000_000,
+                    );
+                } else {
+                    eprint!("\r{} Download attempt {}/{}... {} bytes",
+                        frame_char, attempt, max_attempts, bytes_written,
+                    );
+                }
+                last_update = std::time::Instant::now();
+            }
         }
         
         file.flush().map_err(|e| format!("Failed to flush file: {}", e))?;
-        
-        if let Some(handle) = progress_handle {
-            handle.join().unwrap();
-        }
         
         let mut hasher = Sha256::new();
         let mut file = File::open(&temp_path)
@@ -197,7 +204,8 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
         let actual_hash = format!("{:x}", hasher.finalize());
         
         if actual_hash != expected_sha256 {
-            println!("Checksum mismatch! Expected {}, got {}", expected_sha256, actual_hash);
+            eprintln!("\r\x1b[31m✗\x1b[0m Download attempt {}/{}... Checksum mismatch", attempt, max_attempts);
+            println!("Expected {}, got {}", expected_sha256, actual_hash);
             std::fs::remove_file(&temp_path).ok();
             if attempt < max_attempts {
                 println!("Retrying...");
@@ -210,13 +218,13 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
         std::fs::rename(&temp_path, output_path)
             .map_err(|e| format!("Failed to rename temp file: {}", e))?;
         
-        println!("✅ Downloaded {} bytes, checksum OK", bytes_written);
+        eprintln!("\r\x1b[32m✓\x1b[0m Download attempt {}/{}... Downloaded", attempt, max_attempts);
+        println!("Downloaded {} bytes, checksum OK", bytes_written);
         return Ok(());
     }
     
     Err(format!("Failed to download after {} attempts", max_attempts))
 }
-
 
 pub fn get_disk_size(device: &str) -> Result<u64, String> {
 	let dev = Path::new(device).file_name().and_then(|n| n.to_str()).unwrap_or(device);
@@ -295,6 +303,7 @@ pub fn disk_staff(device: &str) -> Result<(), Box<dyn Error>> {
         eprintln!("creating swap on {}...", part2);
         let cfg = swap_rs::MkswapConfig {
             device: part2,
+            force: true,
             ..Default::default()
         };
         swap_rs::mkswap(&cfg)?;
