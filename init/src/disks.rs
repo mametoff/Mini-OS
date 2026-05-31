@@ -1,17 +1,6 @@
-// ============================================================
-// module: disk
-// Работа с дисками: обнаружение, вывод информации
-// ============================================================
-
 use nix::mount::{mount, MsFlags};
-use std::fs::{OpenOptions, File};
-use mbrman::{MBR, MBRPartitionEntry, CHS};
 use std::time::Duration;
 use std::io::{Read, Write};
-use std::fs;
-use std::os::unix::io::FromRawFd;
-use std::process::Command;
-use libc;
 use std::path::Path;
 use reqwest::blocking::Client;
 use reqwest::header::USER_AGENT;
@@ -19,35 +8,12 @@ use sha2::{Sha256, Digest};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::fs::File;
+use std::io;
+use std::error::Error;
 
-const EXT2_BIN: &[u8] = include_bytes!("ext2.bin");
+const BLKGETSIZE64: libc::c_int = 0x80081272u32 as libc::c_int;
 
-
-pub fn force_create_partition_nodes(disk: &str, partition: u32) -> Result<(), String> {
-    
-    let part_path = format!("/dev/{}{}", disk, partition);
-    
-    // В /sys/block/sda/sda1/dev содержится "major:minor"
-    let dev_path = format!("/sys/block/{}/{}{}/dev", disk, disk, partition);
-    let dev_str = fs::read_to_string(&dev_path)
-        .map_err(|e| format!("Failed to read {}: {}", dev_path, e))?;
-    let parts: Vec<&str> = dev_str.trim().split(':').collect();
-    let major: u32 = parts[0].parse().map_err(|_| "Invalid major")?;
-    let minor: u32 = parts[1].parse().map_err(|_| "Invalid minor")?;
-    
-    // Создаём узел через mknod
-    unsafe {
-        libc::mknod(
-            part_path.as_ptr() as *const _,
-            libc::S_IFBLK | 0o600,
-            libc::makedev(major, minor),
-        );
-    }
-    
-    Ok(())
-}
-
-///  структура, которая представляет диск
 #[derive(Debug, Clone)]
 pub struct Disk {
     pub name: String,   // например, "sda"
@@ -55,7 +21,7 @@ pub struct Disk {
     pub model: String,  // модель диска
 }
 
-/// Форматирует размер в человеко-читаемый вид
+/// Building human readable disk size
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
@@ -67,7 +33,7 @@ pub fn format_size(bytes: u64) -> String {
     format!("{:.1} {}", size, UNITS[unit])
 }
 
-/// Обнаруживает первый доступный диск в системе
+// Looking for first available disk
 pub fn find_first_disk() -> Option<Disk> {
 	if !std::path::Path::new("/dev/sda").exists() {
         let _ = std::process::Command::new("mount")
@@ -131,115 +97,7 @@ pub fn find_first_disk() -> Option<Disk> {
 }
 
 
-/// Создаёт MBR с двумя разделами (root и swap)
-pub fn create_mbr(
-    disk_path: &str,
-    root_start: u32,
-    root_sectors: u32,
-    swap_start: u32,
-    swap_sectors: u32,
-) -> Result<(), String> {
-    // 1. Открываем диск на запись
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(disk_path)
-        .map_err(|e| format!("Failed to open {}: {}", disk_path, e))?;
-
-    // 2. Создаём новую, пустую MBR
-    let mut mbr = MBR::new_from(&mut file, 512, [0x00; 4])
-        .map_err(|e| format!("Failed to create MBR: {}", e))?;
-
-    // 3. Создаём запись для root-раздела (индекс 1)
-    let mut root_entry = MBRPartitionEntry::empty();
-    root_entry.boot = 0x80;            // Загрузочный флаг
-    root_entry.sys = 0x83;             // Тип: Linux filesystem
-    root_entry.starting_lba = root_start;
-    root_entry.sectors = root_sectors;
-    root_entry.first_chs = CHS::empty();
-    root_entry.last_chs = CHS::empty();
-    mbr[1] = root_entry;               // <- ВАЖНО: индексация с 1
-
-    // 4. Создаём запись для swap-раздела (индекс 2)
-    let mut swap_entry = MBRPartitionEntry::empty();
-    swap_entry.boot = 0x00;            // Не загрузочный
-    swap_entry.sys = 0x82;             // Тип: Linux swap
-    swap_entry.starting_lba = swap_start;
-    swap_entry.sectors = swap_sectors;
-    swap_entry.first_chs = CHS::empty();
-    swap_entry.last_chs = CHS::empty();
-    mbr[2] = swap_entry;
-
-    // 5. Записываем MBR обратно на диск
-    mbr.write_into(&mut file)
-        .map_err(|e| format!("Failed to write MBR: {}", e))?;
-
-    // Синхронизируем изменения с диском
-    unsafe { libc::sync(); }
-    std::thread::sleep(std::time::Duration::from_secs(1));
-
-    println!("✅ MBR created on {}", disk_path);
-    Ok(())
-}
-
-    
-
-/// Создаёт swap-раздел (записывает заголовок)
-pub fn create_swap(partition_path: &str) -> Result<(), String> {  
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(partition_path)
-        .map_err(|e| format!("Failed to open {}: {}", partition_path, e))?;
-    
-    // Swap header в последних 10 байтах первого килобайта
-    // Смещения: 1024 - 10 = 1014
-    let offset = 1014;
-    let mut header = vec![0u8; 1024];
-    
-    // Магическое число "swap" (little-endian)
-    let magic = 0x73776170u32;
-    header[offset] = (magic & 0xff) as u8;
-    header[offset + 1] = ((magic >> 8) & 0xff) as u8;
-    header[offset + 2] = ((magic >> 16) & 0xff) as u8;
-    header[offset + 3] = ((magic >> 24) & 0xff) as u8;
-    
-    // Версия 1
-    let version = 1u32;
-    header[offset + 8] = (version & 0xff) as u8;
-    header[offset + 9] = ((version >> 8) & 0xff) as u8;
-    
-    // Размер страницы 4096 байт
-    header[offset + 4] = 0x10;
-    header[offset + 5] = 0x00;
-    
-    file.write_all(&header)
-        .map_err(|e| format!("Failed to write swap header: {}", e))?;
-    
-    println!("✅ Swap created on {}", partition_path);
-    Ok(())
-}
-
-pub fn format_ext2(disk_path: &str) -> Result<(), String> {
-    let fd = unsafe { libc::memfd_create(b"ext2\0".as_ptr() as *const i8, 0) };
-    if fd < 0 {
-        return Err("memfd_create failed".into());
-    }
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    file.write_all(EXT2_BIN).map_err(|e| e.to_string())?;
-
-    let path = format!("/proc/self/fd/{}", fd);
-
-    let output = Command::new(&path)
-    .arg(disk_path)
-    .output()
-    .map_err(|e| e.to_string())?;
-
-	if output.status.success() {
-    	println!("✅ Root partition formatted on {}", disk_path);
-    	Ok(())
-	} else {
-    	Err(String::from_utf8_lossy(&output.stderr).to_string())
-	}
-}
+// Donloading with retries
 
 pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expected_sha256: &str) -> Result<(), String> {
     let output_dir = Path::new(output_path).parent().unwrap();
@@ -262,7 +120,6 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             Err(_) => 0,
         };
         
-        // Скачиваем с прогресс-баром
         let mut response = client.get(url)
             .header(USER_AGENT, "minios-installer/0.1")
             .send()
@@ -277,7 +134,6 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
         let downloaded = Arc::new(AtomicU64::new(0));
         let downloaded_clone = downloaded.clone();
         
-        // Поток для отображения прогресса
         let progress_handle = if total_size > 0 {
             Some(thread::spawn(move || {
                 loop {
@@ -300,7 +156,6 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             None
         };
         
-        // Сохраняем во временный файл
         let temp_path = format!("{}.tmp", output_path);
         let mut file = File::create(&temp_path)
             .map_err(|e| format!("Failed to create temp file: {}", e))?;
@@ -326,7 +181,6 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             handle.join().unwrap();
         }
         
-        // Проверяем SHA256
         let mut hasher = Sha256::new();
         let mut file = File::open(&temp_path)
             .map_err(|e| format!("Failed to open temp file for checksum: {}", e))?;
@@ -353,7 +207,6 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             }
         }
         
-        // Успех: перемещаем временный файл в конечный
         std::fs::rename(&temp_path, output_path)
             .map_err(|e| format!("Failed to rename temp file: {}", e))?;
         
@@ -362,4 +215,91 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
     }
     
     Err(format!("Failed to download after {} attempts", max_attempts))
+}
+
+
+pub fn get_disk_size(device: &str) -> Result<u64, String> {
+	let dev = Path::new(device).file_name().and_then(|n| n.to_str()).unwrap_or(device);
+	let sys_path = format!("/sys/block/{}/size", dev);
+	match std::fs::read_to_string(&sys_path) {
+		Ok(content) => {
+			let sectors: u64 = content.trim().parse().map_err(|e|format!("cannot parse {}:     {}", sys_path, e))?;
+			Ok(sectors * 512)
+   		}
+		Err(_) => {
+			let cdev = std::ffi::CString::new(device).map_err(|_|"invalid device path".to_string())?;
+			let fd = unsafe { libc::open(cdev.as_ptr(),libc::O_RDONLY)
+		};
+		if fd < 0 {
+			return Err(format!("cannot open {}: {}",device,io::Error::last_os_error()));
+		}
+		let mut size: u64 = 0; 
+		let rc = unsafe {
+			libc::ioctl(fd, BLKGETSIZE64, &mut size as *mut u64)
+      		};
+		unsafe { libc::close(fd) };
+		if rc < 0 {
+			return Err(format!("cannot get size of {}: {}", device, io::Error::last_os_error()));
+		} 
+		Ok(size)
+	}
+}
+  }
+ 
+pub fn run_sfdisk_script(device: &str, script: &str) -> Result<(), String> {
+	let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+    	return Err(format!("pipe failed: {}", io::Error::last_os_error())); 
+    }
+    let (rfd, wfd) = (fds[0], fds[1]);
+    let bytes = script.as_bytes(); 
+	let n = unsafe { libc::write(wfd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+    unsafe { libc::close(wfd) };
+	if n as usize != bytes.len() {
+		unsafe { libc::close(rfd) };
+		return Err(format!("pipe write failed {}",io::Error::last_os_error()));
+	}
+    unsafe { libc::dup2(rfd, 0) };
+    unsafe { libc::close(rfd) };
+    let rc = sfdisk_sys::sfdisk(&["sfdisk", device]);
+    if rc != 0 {
+   		return Err(format!("sfdisk failed with code {}", rc));
+    }
+	Ok(())
+}
+
+
+pub fn disk_staff(device: &str) -> Result<(), Box<dyn Error>> {
+    let disk_size = get_disk_size(device)?;
+    let disk_mib = disk_size / (1 << 20);
+    let available_mib = disk_mib.saturating_sub(1);
+    let swap_mib = (available_mib / 4).min(1024);
+    let primary_mib = available_mib.saturating_sub(swap_mib);
+
+    if primary_mib < 8 {
+        return Err(format!("disk too small ({} MiB)", disk_mib).into());
+    }
+
+    eprintln!("disk: {} MiB, primary: {} MiB, swap: {} MiB", disk_mib, primary_mib, swap_mib);
+
+    let script = format!(
+    "label: dos\n, {}M, L\n, {}M, S\nwrite\nquit\n", primary_mib, swap_mib);
+    run_sfdisk_script(device, &script)?;
+
+    let part1 = format!("{}1", device);
+    eprintln!("formatting {} as ext2 (MINI-OS)...", part1);
+    ext234_rs::format_fs(&part1, "ext2", "MINI-OS")?;
+
+    if swap_mib > 0 {
+        let part2 = format!("{}2", device);
+        eprintln!("creating swap on {}...", part2);
+        let cfg = swap_rs::MkswapConfig {
+            device: part2,
+            ..Default::default()
+        };
+        swap_rs::mkswap(&cfg)?;
+    }
+
+    eprintln!("done.");
+    Ok(())
 }

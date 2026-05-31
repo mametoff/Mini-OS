@@ -6,7 +6,7 @@ use std::path::Path;
 use std::net::UdpSocket;
 use std::time::Duration;
 use disks::download_with_retry;
-use disks::format_ext2;
+use disks::disk_staff;
 use std::fs;
 
 fn main() {
@@ -109,52 +109,9 @@ println!("\n=== Installation Mode ===");
 		}
 	};
 
-	println!("\n=== Partitioning disk ===");
-
-	let sector_size = 512u64;
-	let total_sectors = disk.size / sector_size;
-	let root_start = 2048u32;
-
-	let mut swap_sectors = (total_sectors / 5) as u32;
-	let root_sectors = (total_sectors as u32) - root_start - swap_sectors;
-	let swap_start = root_start + root_sectors;
-	let swap_last = swap_start + swap_sectors - 1;
-	if swap_last > total_sectors as u32 - 1 {
-		swap_sectors = (total_sectors as u32) - swap_start;
-	}
-	println!("Total sectors: {}", total_sectors);
-	println!("Root: start={}, sectors={}, end={}", root_start, root_sectors, root_start + root_sectors - 1);
-	println!("Swap: start={}, sectors={}, end={}", swap_start, swap_sectors, swap_start + swap_sectors - 1);
-
-	if let Err(e) = disks::create_mbr(
-	    &format!("/dev/{}", disk.name),root_start,root_sectors,swap_start,swap_sectors,) {
-			println!("MBR creation failed: {}", e);
-	}
-	if let Err(e) = disks::force_create_partition_nodes(&disk.name, 1) {
-	    println!("Warning: failed to create /dev/{}1: {}", disk.name, e);
-	}
-	if let Err(e) = disks::force_create_partition_nodes(&disk.name, 2) {
-	    println!("Warning: failed to create /dev/{}2: {}", disk.name, e);
-	}
-
-	std::thread::sleep(std::time::Duration::from_secs(5));
-
-	if !std::path::Path::new(&format!("/dev/{}1", disk.name)).exists() {
-	    println!("ERROR: /dev/{}1 not created!", disk.name);
-	}
-	if !std::path::Path::new(&format!("/dev/{}2", disk.name)).exists() {
-	    println!("ERROR: /dev/{}2 not created!", disk.name);
-	}
-
-	println!("✅ Partitions created: /dev/{}1 and /dev/{}2", disk.name, disk.name);
-
-	println!("\n=== Formatting partitions ===");
-	format_ext2(&format!("/dev/{}1", disk.name)).map_err(|e| format!("Formating  failed: {}", e))?;
-	if let Err(e) = disks::create_swap(&format!("/dev/{}2", disk.name)) {
-	    println!("Failed to create swap: {}", e);
-	}
-	unsafe { libc::sync(); }
-	std::thread::sleep(std::time::Duration::from_secs(3));
+	println!("\n=== Partitioning and format disk ===");
+	
+	let _ = disk_staff(&format!("/dev/{}",disk.name));
 
 	println!("\n=== Mounting root partition ===");
 	let mount_point = "/mnt";

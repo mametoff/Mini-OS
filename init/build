@@ -4,3 +4,6 @@ cp target/x86_64-unknown-linux-musl/release/minios-installer ../irfs/init
 rm -rf target
 cd ..
 ./build_irfs
+cd iso
+./build
+cp output/minios.iso ../../Thome/vm/minios.iso
