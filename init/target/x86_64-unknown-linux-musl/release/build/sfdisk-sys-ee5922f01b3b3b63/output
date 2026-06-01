@@ -1,3 +1,0 @@
-cargo:rustc-link-lib=static=fdisk
-cargo:rustc-link-lib=static=uuid
-cargo:rerun-if-changed=build.rs
