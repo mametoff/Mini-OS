@@ -1,11 +1,12 @@
 mod disks;
 
-use std::io::{self, Write};
-use std::os::unix::fs::symlink;
+use std::io::{self, Read, Write};
 use nix::mount::{mount, MsFlags};
 use std::path::Path;
 use std::net::UdpSocket;
 use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use disks::download_with_retry;
 use disks::disk_staff;
 
@@ -165,49 +166,61 @@ println!("\n=== Installation Mode ===");
 
 	println!("\n=== Extracting rootfs ===");
 
+	let tar_file = std::fs::File::open(output_path)
+	    .map_err(|e| format!("Failed to open {}: {}", output_path, e))?;
+	let file_size = tar_file.metadata()
+	    .map_err(|e| format!("Failed to get file size: {}", e))?.len();
+
+	struct CountingReader<R> {
+	    inner: R,
+	    count: Arc<AtomicU64>,
+	}
+	impl<R: Read> Read for CountingReader<R> {
+	    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+	        let n = self.inner.read(buf)?;
+	        self.count.fetch_add(n as u64, Ordering::Relaxed);
+	        Ok(n)
+	    }
+	}
+
 	const DOTS9: &[&str] = &["⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"];
+
+	let extracted = Arc::new(AtomicU64::new(0));
+	let counting = CountingReader { inner: tar_file, count: extracted.clone() };
+
 	let mut frame = 0usize;
 	let mut last_update = std::time::Instant::now();
 
-	let entries = tar_light::list_entry(output_path)
-	    .map_err(|e| format!("Failed to read archive '{}': {}", output_path, e))?;
-	let total = entries.len();
+	let tar = flate2::read::GzDecoder::new(counting);
+	let mut archive = tar::Archive::new(tar);
 
-	for (i, entry) in entries.iter().enumerate() {
-	    let mut name = entry.header.name.clone();
-	    while name.starts_with('/') {
-	        name = name[1..].to_string();
-	    }
-	    let stripped = name.trim_start_matches('/');
-	    if stripped.is_empty() || stripped.split('/').any(|p| p == "..") {
+	for entry in archive.entries()
+	    .map_err(|e| format!("Failed to read archive entries: {}", e))?
+	{
+	    let mut entry = entry
+	        .map_err(|e| format!("Failed to read archive entry: {}", e))?;
+	    let path_str = entry.path()
+	        .map_err(|e| format!("Failed to get entry path: {}", e))?
+	        .into_owned();
+
+	    // Normalize: strip leading / and ./
+	    let s = path_str.to_string_lossy().to_string();
+	    let s = s.trim_start_matches('/')
+	              .trim_start_matches("./")
+	              .to_string();
+	    if s.is_empty() || s == "rootfs.tar.gz" || s.split('/').any(|p| p == "..") {
 	        continue;
 	    }
 
-	    let dst = Path::new("/mnt").join(stripped);
-
-	    if entry.header.typeflag == b'5' {
-	        std::fs::create_dir_all(&dst)
-	            .map_err(|e| format!("Failed to create dir {}: {}", dst.display(), e))?;
-	    } else if entry.header.typeflag == b'2' {
-	        if let Some(parent) = dst.parent() {
-	            std::fs::create_dir_all(parent)
-	                .map_err(|e| format!("Failed to create parent for {}: {}", dst.display(), e))?;
-	        }
-	        symlink(&entry.header.linkname, &dst)
-	            .map_err(|e| format!("Failed to create symlink {}: {}", dst.display(), e))?;
-	    } else {
-	        if let Some(parent) = dst.parent() {
-	            std::fs::create_dir_all(parent)
-	                .map_err(|e| format!("Failed to create parent for {}: {}", dst.display(), e))?;
-	        }
-	        std::fs::write(&dst, &entry.data)
-	            .map_err(|e| format!("Failed to write {}: {}", dst.display(), e))?;
-	    }
+	    let dst = Path::new("/mnt").join(&s);
+	    entry.unpack(&dst)
+	        .map_err(|e| format!("Failed to extract {}: {}", s, e))?;
 
 	    if last_update.elapsed() >= std::time::Duration::from_millis(80) {
-	        let pct = (i + 1) * 100 / total;
+	        let current = extracted.load(Ordering::Relaxed);
+	        let pct = if file_size > 0 { current * 100 / file_size } else { 0 };
 	        let filled = (pct * 25 / 100).min(25) as usize;
-	        let bar: String = (0..25).map(|j| if j < filled { '=' } else { ' ' }).collect();
+	        let bar: String = (0..25).map(|i| if i < filled { '=' } else { ' ' }).collect();
 	        eprint!("\r{} Extracting rootfs... [{}] {}%",
 	            DOTS9[frame % DOTS9.len()], bar, pct);
 	        frame = (frame + 1) % DOTS9.len();

@@ -8,7 +8,8 @@ libc = "0.2"
 nix = { version = "0.31", features = ["mount"] }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
 
-tar_light = "0.1"
+tar = "0.4"
+flate2 = "1.0"
 getopts="0.2"
 sha2 = "0.10"
 ext234-rs = { git = "https://github.com/mametoff/ext234-rs.git" }

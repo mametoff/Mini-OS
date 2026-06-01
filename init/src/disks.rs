@@ -298,7 +298,7 @@ pub fn disk_staff(device: &str) -> Result<(), Box<dyn Error>> {
     eprintln!("formatting {} as ext2 (MINI-OS)...", part1);
     ext234_rs::format_fs(&part1, "ext2", "MINI-OS")?;
 
-    if swap_mib > 0 {
+/*    if swap_mib > 0 {
         let part2 = format!("{}2", device);
         eprintln!("creating swap on {}...", part2);
         let cfg = swap_rs::MkswapConfig {
@@ -308,7 +308,8 @@ pub fn disk_staff(device: &str) -> Result<(), Box<dyn Error>> {
         };
         swap_rs::mkswap(&cfg)?;
     }
-
+*/
     eprintln!("done.");
     Ok(())
 }
+
