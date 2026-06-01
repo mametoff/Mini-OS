@@ -7,8 +7,7 @@ use std::net::UdpSocket;
 use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use disks::download_with_retry;
-use disks::disk_staff;
+use disks::{download_with_retry, disk_staff};
 
 
 
@@ -157,10 +156,21 @@ println!("\n=== Installation Mode ===");
 	println!("\n=== Downloading rootfs ===");
 
 	let url = "https://github.com/Mini-OS/Mini-OS/raw/refs/heads/main/rootfs/rootfs.tar.gz";
+	let checksum_url = "https://github.com/Mini-OS/Mini-OS/raw/refs/heads/main/rootfs/checksum";
 	let output_path = "/install/rootfs.tar.gz";
-	let expected_sha256 = "3538750688079ab5144645e81a93652c1ed4b9572dc3fd8669ccac8cb080f987";
 
-	download_with_retry(url, output_path, 5, expected_sha256)?;
+	println!("Downloading checksum...");
+	let expected_sha256 = disks::download_text(checksum_url)?
+	    .trim()
+	    .split_whitespace()
+	    .next()
+	    .unwrap_or("")
+	    .to_string();
+	if expected_sha256.is_empty() {
+	    return Err("Failed to read checksum".into());
+	}
+
+	download_with_retry(url, output_path, 5, &expected_sha256)?;
 
 	println!("✅ Download completed");
 

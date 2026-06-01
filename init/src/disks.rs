@@ -96,6 +96,22 @@ pub fn find_first_disk() -> Option<Disk> {
 
 // Donloading with retries
 
+pub fn download_text(url: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let resp = client.get(url)
+        .header(USER_AGENT, "minios-installer/0.1")
+        .send()
+        .map_err(|e| format!("Failed to download {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP error {} downloading {}", resp.status(), url));
+    }
+    resp.text().map_err(|e| format!("Failed to read response: {}", e))
+}
+
 const DOTS9_FRAMES: &[&str] = &["⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"];
 const BAR_WIDTH: usize = 25;
 
