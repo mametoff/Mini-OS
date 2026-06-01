@@ -60,7 +60,12 @@ fn main() {
 
         match choice.trim() {
             "1" => {
-                if let Err(e) = install() {
+                print!("\x1b[?25l");
+                io::stdout().flush().ok();
+                let result = install();
+                print!("\x1b[?25h");
+                io::stdout().flush().ok();
+                if let Err(e) = result {
                     println!("Installation failed: {}", e);
                     println!("Press Enter to continue...");
                     let mut _buf = String::new();
@@ -223,8 +228,9 @@ println!("\n=== Installation Mode ===");
 	    }
 
 	    let dst = Path::new("/mnt").join(&s);
-	    entry.unpack(&dst)
-	        .map_err(|e| format!("Failed to extract {}: {}", s, e))?;
+	    if let Err(e) = entry.unpack(&dst) {
+	        eprintln!("\nWarning: failed to extract {}: {}", s, e);
+	    }
 
 	    if last_update.elapsed() >= std::time::Duration::from_millis(80) {
 	        let current = extracted.load(Ordering::Relaxed);
@@ -238,7 +244,7 @@ println!("\n=== Installation Mode ===");
 	    }
 	}
 
-	eprintln!("\r\x1b[32m✓\x1b[0m Extracting rootfs... Done");
+	eprintln!("\r\x1b[32m✓\x1b[0m Extracting rootfs... Done\x1b[K");
 	println!(" Extracted to /mnt");
 
 	println!("\n=== Cleaning up ===");

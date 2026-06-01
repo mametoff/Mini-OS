@@ -159,7 +159,7 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
             .map_err(|e| format!("Request failed: {}", e))?;
         
         if !response.status().is_success() {
-            eprintln!("\r\x1b[31m✗\x1b[0m Download attempt {}/{}... HTTP error {}",
+            eprintln!("\r\x1b[31m✗\x1b[0m Download attempt {}/{}... HTTP error {}\x1b[K",
                 attempt, max_attempts, response.status());
             println!("Retrying...");
             continue;
@@ -220,7 +220,7 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
         let actual_hash = format!("{:x}", hasher.finalize());
         
         if actual_hash != expected_sha256 {
-            eprintln!("\r\x1b[31m✗\x1b[0m Download attempt {}/{}... Checksum mismatch", attempt, max_attempts);
+            eprintln!("\r\x1b[31m✗\x1b[0m Download attempt {}/{}... Checksum mismatch\x1b[K", attempt, max_attempts);
             println!("Expected {}, got {}", expected_sha256, actual_hash);
             std::fs::remove_file(&temp_path).ok();
             if attempt < max_attempts {
@@ -234,7 +234,7 @@ pub fn download_with_retry(url: &str, output_path: &str, max_attempts: u32, expe
         std::fs::rename(&temp_path, output_path)
             .map_err(|e| format!("Failed to rename temp file: {}", e))?;
         
-        eprintln!("\r\x1b[32m✓\x1b[0m Download attempt {}/{}... Downloaded", attempt, max_attempts);
+        eprintln!("\r\x1b[32m✓\x1b[0m Download attempt {}/{}... Downloaded\x1b[K", attempt, max_attempts);
         println!("Downloaded {} bytes, checksum OK", bytes_written);
         return Ok(());
     }
@@ -283,11 +283,16 @@ pub fn run_sfdisk_script(device: &str, script: &str) -> Result<(), String> {
 		unsafe { libc::close(rfd) };
 		return Err(format!("pipe write failed {}",io::Error::last_os_error()));
 	}
+    let saved_stdin = unsafe { libc::dup(0) };
     unsafe { libc::dup2(rfd, 0) };
     unsafe { libc::close(rfd) };
     let rc = sfdisk_sys::sfdisk(&["sfdisk", device]);
+    if saved_stdin >= 0 {
+        unsafe { libc::dup2(saved_stdin, 0) };
+        unsafe { libc::close(saved_stdin) };
+    }
     if rc != 0 {
-   		return Err(format!("sfdisk failed with code {}", rc));
+    		return Err(format!("sfdisk failed with code {}", rc));
     }
 	Ok(())
 }
