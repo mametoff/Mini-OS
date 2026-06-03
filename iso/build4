@@ -1,0 +1,63 @@
+#!/bin/bash
+# Сборка ISO с isolinux
+
+set -e
+
+cd "$(dirname "$0")"
+
+# Проверка
+for f in ../kernel4/kernel ../irfs/irfs.gz isolinux/isolinux.bin isolinux/isolinux.cfg; do
+    if [ ! -f "$f" ]; then
+        echo "Ошибка: $f не найден"
+        exit 1
+    fi
+done
+
+echo "========================================="
+echo "  Сборка ISO с Isolinux"
+echo "========================================="
+
+# Очистка
+rm -rf output
+mkdir -p output/iso
+
+# Копируем файлы
+echo "Копирование файлов..."
+cp ../kernel4/kernel       output/iso/
+cp ../irfs/irfs.gz        output/iso/
+cp isolinux/isolinux.cfg  output/iso/
+cp isolinux/isolinux.bin  output/iso/
+
+# Копируем ldlinux.c32 если есть
+if [ -f isolinux/ldlinux.c32 ]; then
+    cp isolinux/ldlinux.c32 output/iso/
+fi
+
+# Копируем остальные .c32 файлы если есть
+for f in isolinux/*.c32; do
+    [ -f "$f" ] && cp "$f" output/iso/
+done
+
+echo "  Файлы:"
+ls -la output/iso/
+
+# Создаём ISO
+echo ""
+echo "Создание ISO..."
+
+genisoimage -R -J \
+    -b isolinux.bin \
+    -c boot.catalog \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -boot-info-table \
+    -o output/minios.iso \
+    output/iso
+
+echo ""
+echo "========================================="
+echo "  ISO создан: output/minios.iso"
+echo "  Размер: $(du -h output/minios.iso | cut -f1)"
+echo "========================================="
+
+rm -rf output/iso

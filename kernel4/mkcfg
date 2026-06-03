@@ -1,0 +1,85 @@
+#!/bin/sh
+cd linux-4.9.337
+export ARCH=x86_64
+export CROSS_COMPILE=x86_64-linux-gnu-
+
+# 1. Создаём абсолютный минимум
+make tinyconfig
+
+# 2. Добавляем всё необходимое в .config (можно копировать блоком)
+# ==================== Базовые платформенные ====================
+scripts/config --enable CONFIG_64BIT
+scripts/config --enable CONFIG_X86_64
+scripts/config --enable CONFIG_SMP
+scripts/config --set-val CONFIG_NR_CPUS 4
+scripts/config --enable CONFIG_ACPI
+scripts/config --enable CONFIG_PCI
+scripts/config --enable CONFIG_PCI_MSI
+scripts/config --enable CONFIG_X86_LOCAL_APIC
+scripts/config --enable CONFIG_X86_IO_APIC
+scripts/config --enable CONFIG_MCORE2          # Core2Duo
+scripts/config --disable CONFIG_IA32_EMULATION # не нужна 32‑бит
+scripts/config --enable CONFIG_PRINTK
+scripts/config --enable CONFIG_BUG
+
+# ==================== Без модулей ====================
+scripts/config --disable CONFIG_MODULES
+
+# ==================== SCSI, ATA/SATA, блочные ====================
+scripts/config --enable CONFIG_SCSI
+scripts/config --enable CONFIG_BLK_DEV_SD       # SCSI disks → SATA
+scripts/config --enable CONFIG_BLK_DEV_SR       # SCSI CD-ROM
+scripts/config --enable CONFIG_ATA
+scripts/config --enable CONFIG_ATA_PIIX         # Intel PIIX IDE
+scripts/config --enable CONFIG_SATA_AHCI        # SATA AHCI
+scripts/config --enable CONFIG_BLK_DEV_RAM      # RAM drive
+scripts/config --set-val CONFIG_BLK_DEV_RAM_SIZE 131072  # 128 МБ
+scripts/config --enable CONFIG_BLK_DEV_INITRD
+
+# ==================== Файловые системы ====================
+scripts/config --enable CONFIG_EXT2_FS
+scripts/config --enable CONFIG_EXT3_FS
+scripts/config --enable CONFIG_EXT4_FS
+scripts/config --enable CONFIG_FAT_FS
+scripts/config --enable CONFIG_VFAT_FS
+scripts/config --enable CONFIG_MSDOS_FS
+scripts/config --enable CONFIG_ISO9660_FS
+scripts/config --enable CONFIG_PROC_FS
+scripts/config --enable CONFIG_SYSFS
+scripts/config --enable CONFIG_TMPFS
+scripts/config --enable CONFIG_DEVTMPFS
+scripts/config --enable CONFIG_DEVTMPFS_MOUNT
+
+# ==================== Консоль и последовательный порт ====================
+scripts/config --enable CONFIG_TTY
+scripts/config --enable CONFIG_SERIAL_8250
+scripts/config --enable CONFIG_SERIAL_8250_CONSOLE
+scripts/config --enable CONFIG_VT
+scripts/config --enable CONFIG_FB
+scripts/config --enable CONFIG_FB_VESA
+scripts/config --enable CONFIG_FB_VGA16       # минимальный видео для -vga std
+
+# ==================== Сеть + DHCP + Realtek ====================
+scripts/config --enable CONFIG_NET
+scripts/config --enable CONFIG_INET
+scripts/config --enable CONFIG_PACKET
+scripts/config --enable CONFIG_NETDEVICES
+scripts/config --enable CONFIG_ETHERNET
+scripts/config --enable CONFIG_NET_VENDOR_REALTEK
+scripts/config --enable CONFIG_8139TOO   # Realtek RTL8139
+scripts/config --enable CONFIG_8139CP    # Realtek RTL8139C+
+scripts/config --enable CONFIG_IP_PNP
+scripts/config --enable CONFIG_IP_PNP_DHCP
+scripts/config --disable CONFIG_IP_PNP_BOOTP
+scripts/config --disable CONFIG_IP_PNP_RARP
+
+# ==================== Выключаем звук и всё лишнее ====================
+scripts/config --disable CONFIG_SOUND
+scripts/config --disable CONFIG_SND
+scripts/config --disable CONFIG_USB_SUPPORT
+
+# 3. Даём olddefconfig доставить зависимости и выставить умолчания
+make olddefconfig
+
+# 4. Компилируем (только ядро)
+make -j$(nproc) bzImage
